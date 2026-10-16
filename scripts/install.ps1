@@ -1,6 +1,7 @@
 ﻿# Подключает маркетплейс xebcyp-plugins к Claude Code на этом компьютере (Windows).
 # Дописывает в ~/.claude/settings.json маркетплейсы и включённые плагины из
 # templates/user-settings.json. Уже заданные ключи не трогает, делает резервную копию.
+# В ~/.claude/CLAUDE.md ставит или обновляет блок общих правил из templates/user-CLAUDE.md.
 #
 # Запуск:
 #   irm https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/install.ps1 | iex
@@ -50,6 +51,38 @@ if ($added) {
     $added | ForEach-Object { Write-Host '  +' $_ }
 } else {
     Write-Host 'Всё уже было настроено:' $settingsPath
+}
+
+# Общие правила в ~/.claude/CLAUDE.md: блок между метками ставится или заменяется, остальной текст не трогается.
+$mdUrl = 'https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/templates/user-CLAUDE.md'
+$localMd = if ($PSScriptRoot) { Join-Path $PSScriptRoot '..\templates\user-CLAUDE.md' } else { $null }
+if ($localMd -and (Test-Path $localMd)) {
+    $block = [System.IO.File]::ReadAllText((Resolve-Path $localMd), [System.Text.Encoding]::UTF8)
+} else {
+    $resp = Invoke-WebRequest -Uri $mdUrl -UseBasicParsing
+    $block = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
+}
+$block = $block.Trim() -replace "`r`n", "`n"
+$mdPath = Join-Path $claudeDir 'CLAUDE.md'
+$utf8 = New-Object System.Text.UTF8Encoding $false
+$pattern = '(?s)<!-- xebcyp-plugins:begin.*?<!-- xebcyp-plugins:end -->'
+if (Test-Path $mdPath) {
+    $md = [System.IO.File]::ReadAllText($mdPath, [System.Text.Encoding]::UTF8) -replace "`r`n", "`n"
+    if ($md -match $pattern) {
+        $new = [regex]::Replace($md, $pattern, { param($m) $block })
+    } else {
+        $new = $md.TrimEnd() + "`n`n" + $block + "`n"
+    }
+    if ($new -ne $md) {
+        Copy-Item $mdPath "$mdPath.bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        [System.IO.File]::WriteAllText($mdPath, $new, $utf8)
+        Write-Host 'Обновлён блок общих правил в' $mdPath
+    } else {
+        Write-Host 'Общие правила уже актуальны:' $mdPath
+    }
+} else {
+    [System.IO.File]::WriteAllText($mdPath, "# Общие правила для всех проектов`n`n" + $block + "`n", $utf8)
+    Write-Host 'Создан' $mdPath
 }
 
 # Доступ git к GitHub без запроса пароля (нужен для приватных маркетплейсов и автообновления).

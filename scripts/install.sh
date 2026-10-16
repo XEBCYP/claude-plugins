@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Подключает маркетплейс xebcyp-plugins к Claude Code (Linux / macOS).
 # На Linux/macOS включает Python-версию навыков 1С (1c-skills-py) вместо PowerShell-версии.
+# В ~/.claude/CLAUDE.md ставит или обновляет блок общих правил из templates/user-CLAUDE.md.
 #
 #   curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/install.sh | bash
 set -euo pipefail
@@ -32,6 +33,28 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(settings, f, ensure_ascii=False, indent=2)
     f.write("\n")
 print("Добавлено:" if added else "Всё уже было настроено.", *added, sep="\n  + ")
+PY
+
+# Общие правила в ~/.claude/CLAUDE.md: блок между метками ставится или заменяется, остальной текст не трогается.
+MD_URL="https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/templates/user-CLAUDE.md"
+BLOCK="$(curl -fsSL "$MD_URL")"
+BLOCK="$BLOCK" python3 - "$CLAUDE_DIR/CLAUDE.md" <<'PY'
+import os, re, shutil, sys, time
+path = sys.argv[1]
+block = os.environ["BLOCK"].strip()
+pattern = re.compile(r"<!-- xebcyp-plugins:begin.*?<!-- xebcyp-plugins:end -->", re.S)
+if os.path.exists(path):
+    md = open(path, encoding="utf-8").read()
+    new = pattern.sub(lambda m: block, md) if pattern.search(md) else md.rstrip() + "\n\n" + block + "\n"
+    if new != md:
+        shutil.copy(path, path + time.strftime(".bak-%Y%m%d-%H%M%S"))
+        open(path, "w", encoding="utf-8").write(new)
+        print("Обновлён блок общих правил в", path)
+    else:
+        print("Общие правила уже актуальны:", path)
+else:
+    open(path, "w", encoding="utf-8").write("# Общие правила для всех проектов\n\n" + block + "\n")
+    print("Создан", path)
 PY
 
 python3 -c 'import lxml, PIL, psutil' 2>/dev/null || python3 -m pip install --user -q 'lxml>=4.9.0' 'Pillow>=10.0.0' 'psutil>=5.9.0' || true
