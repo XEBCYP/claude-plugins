@@ -1,0 +1,10 @@
+{
+  "name": "delivery-control",
+  "description": "Контроль больших задач: требования дословно с номерами, независимые проверки свежим агентом (план против постановки, слепая приёмка), расчёт «один агент или несколько», правила раздачи работы и отчёт при сдаче.",
+  "version": "1.0.0",
+  "author": {
+    "name": "XEBCYP"
+  },
+  "license": "MIT",
+  "keywords": ["workflow", "requirements", "verification", "acceptance", "subagents"]
+}

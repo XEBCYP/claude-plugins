@@ -65,6 +65,12 @@
       "description": "Иконки для интерфейсов: Lucide по умолчанию, Tabler для бизнес-иконок; React, HTML, офлайн-PWA (SVG-спрайт) и соответствие объектов 1С иконкам.",
       "category": "design",
       "source": "./plugins/ui-icons"
+    },
+    {
+      "name": "delivery-control",
+      "description": "Контроль больших задач: требования дословно с номерами, независимые проверки свежим агентом (план против постановки, слепая приёмка), расчёт «один агент или несколько», отчёт при сдаче.",
+      "category": "workflow",
+      "source": "./plugins/delivery-control"
     }
   ]
 }
