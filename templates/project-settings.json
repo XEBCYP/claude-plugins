@@ -1,0 +1,30 @@
+{
+  "extraKnownMarketplaces": {
+    "xebcyp-plugins": {
+      "source": { "source": "github", "repo": "XEBCYP/claude-plugins" }
+    },
+    "claude-plugins-official": {
+      "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
+    }
+  },
+  "enabledPlugins": {
+    "1c-skills-py@xebcyp-plugins": true,
+    "1c-skills@xebcyp-plugins": false,
+    "bsl-language-server@xebcyp-plugins": true,
+    "data-skills@xebcyp-plugins": true,
+    "frontend-design@claude-plugins-official": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$(uname -s)\" = Linux ] || exit 0; python3 -c 'import lxml, PIL, psutil' 2>/dev/null || python3 -m pip install --user -q 'lxml>=4.9.0' 'Pillow>=10.0.0' 'psutil>=5.9.0' >/dev/null 2>&1 || true",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}

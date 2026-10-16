@@ -1,0 +1,6 @@
+Этот плагин — копия каталога `data/` из https://github.com/anthropics/knowledge-work-plugins
+(коммит 33eeda1e8fd856455b05479d13a0f85b5f803744), распространяется по лицензии Apache 2.0 (см. LICENSE).
+
+Изменения относительно оригинала:
+- удалён файл .mcp.json (внешние коннекторы Snowflake, Databricks, BigQuery, Hex, Amplitude, Atlassian, Definite);
+- в .claude-plugin/plugin.json изменены name (data -> data-skills), description, добавлены license и repository.

@@ -1,0 +1,30 @@
+{
+  "name": "onec-odata",
+  "description": "Данные живой базы 1С 8.x через штатный OData 3.0 (MCP-сервер @theyahia/aprovodka 4.3.0). Запись в базу — только после явного подтверждения (ONEC_WRITE_MODE=approval).",
+  "version": "1.0.0",
+  "author": {
+    "name": "XEBCYP"
+  },
+  "license": "MIT",
+  "keywords": ["1c", "odata", "accounting", "bp30"],
+  "userConfig": {
+    "base_url": {
+      "type": "string",
+      "title": "Адрес OData базы 1С",
+      "description": "Например: http://server/base/odata/standard.odata. OData публикуется в Конфигураторе: Администрирование → Публикация на веб-сервере, состав OData задаётся обработкой «Настройка автоматического REST-сервиса».",
+      "required": true
+    },
+    "login": {
+      "type": "string",
+      "title": "Пользователь 1С",
+      "description": "Лучше завести отдельного пользователя с правами только на нужные объекты.",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Пароль пользователя 1С",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "xebcyp-plugins",
+  "description": "Проверенные плагины для 1С (7.7/8.x), SQL, OData и дэшбордов. Сторонние плагины закреплены на проверенных коммитах — см. AUDIT.md.",
+  "owner": {
+    "name": "XEBCYP"
+  },
+  "plugins": [
+    {
+      "name": "1c-skills",
+      "description": "[Windows, PowerShell] Навыки для 1С:Предприятие 8.3: формы, метаданные, СКД, MXL, EPF/ERF, расширения, роли, базы, веб-тесты (Nikolay-Shirokov/cc-1c-skills).",
+      "category": "1c",
+      "source": {
+        "source": "github",
+        "repo": "Nikolay-Shirokov/cc-1c-skills",
+        "sha": "acfd9937223b8bffeb3c9c8b04b26ee95a12fcf6"
+      }
+    },
+    {
+      "name": "1c-skills-py",
+      "description": "[Python, любая ОС] Те же навыки для 1С 8.3 на Python — для Linux/облачных сессий. Нужны lxml, Pillow, psutil.",
+      "category": "1c",
+      "source": {
+        "source": "github",
+        "repo": "Nikolay-Shirokov/cc-1c-skills",
+        "ref": "port-claude-code-py",
+        "sha": "231e45a66a6b102254fb3ab2211a5d575de3d53b"
+      }
+    },
+    {
+      "name": "bsl-language-server",
+      "description": "LSP для BSL/OneScript: диагностика, переход к определению, поиск ссылок (1c-syntax/claude-code-bsl-lsp).",
+      "category": "1c",
+      "source": {
+        "source": "github",
+        "repo": "1c-syntax/claude-code-bsl-lsp",
+        "sha": "c303a6050aefe9bbc3a07c23298753274c2b7942"
+      }
+    },
+    {
+      "name": "dbhub",
+      "description": "MCP-сервер SQL-баз (PostgreSQL, MySQL, MariaDB, MS SQL, Oracle, SQLite) только на чтение, до 1000 строк (bytebase/dbhub 1.5.0).",
+      "category": "database",
+      "source": {
+        "source": "git-subdir",
+        "url": "bytebase/dbhub",
+        "path": "plugin",
+        "sha": "2dbf01af53e34784eafc00d777394ec844b98eca"
+      }
+    },
+    {
+      "name": "onec-odata",
+      "description": "Данные живой базы 1С 8.x через штатный OData: справочники, документы, регистры, проводки (MCP aprovodka 4.3.0, запись только с подтверждением).",
+      "category": "1c",
+      "source": "./plugins/onec-odata"
+    },
+    {
+      "name": "data-skills",
+      "description": "SQL-запросы, анализ данных, графики и интерактивные дэшборды (скиллы плагина Data от Anthropic, без внешних коннекторов).",
+      "category": "data",
+      "source": "./plugins/data-skills"
+    }
+  ]
+}
