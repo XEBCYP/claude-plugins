@@ -11,8 +11,8 @@
       "description": "[Windows, PowerShell] Навыки для 1С:Предприятие 8.3: формы, метаданные, СКД, MXL, EPF/ERF, расширения, роли, базы, веб-тесты (Nikolay-Shirokov/cc-1c-skills).",
       "category": "1c",
       "source": {
-        "source": "github",
-        "repo": "Nikolay-Shirokov/cc-1c-skills",
+        "source": "url",
+        "url": "https://github.com/Nikolay-Shirokov/cc-1c-skills.git",
         "sha": "acfd9937223b8bffeb3c9c8b04b26ee95a12fcf6"
       }
     },
@@ -21,8 +21,8 @@
       "description": "[Python, любая ОС] Те же навыки для 1С 8.3 на Python — для Linux/облачных сессий. Нужны lxml, Pillow, psutil.",
       "category": "1c",
       "source": {
-        "source": "github",
-        "repo": "Nikolay-Shirokov/cc-1c-skills",
+        "source": "url",
+        "url": "https://github.com/Nikolay-Shirokov/cc-1c-skills.git",
         "ref": "port-claude-code-py",
         "sha": "231e45a66a6b102254fb3ab2211a5d575de3d53b"
       }
@@ -32,8 +32,8 @@
       "description": "LSP для BSL/OneScript: диагностика, переход к определению, поиск ссылок (1c-syntax/claude-code-bsl-lsp).",
       "category": "1c",
       "source": {
-        "source": "github",
-        "repo": "1c-syntax/claude-code-bsl-lsp",
+        "source": "url",
+        "url": "https://github.com/1c-syntax/claude-code-bsl-lsp.git",
         "sha": "c303a6050aefe9bbc3a07c23298753274c2b7942"
       }
     },
@@ -43,7 +43,7 @@
       "category": "database",
       "source": {
         "source": "git-subdir",
-        "url": "bytebase/dbhub",
+        "url": "https://github.com/bytebase/dbhub.git",
         "path": "plugin",
         "sha": "2dbf01af53e34784eafc00d777394ec844b98eca"
       }

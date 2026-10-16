@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/
 Скрипт дописывает маркетплейс и плагины в `~/.claude/settings.json` (уже заданные настройки не меняет,
 делает резервную копию). После перезапуска Claude Code плагины установятся сами и будут обновляться.
 
-Вручную: `/plugin marketplace add XEBCYP/claude-plugins`, затем `/plugin install <плагин>@xebcyp-plugins`.
+Вручную: `/plugin marketplace add https://github.com/XEBCYP/claude-plugins.git`, затем `/plugin install <плагин>@xebcyp-plugins`.
 
 ## Облачные сессии и проекты
 

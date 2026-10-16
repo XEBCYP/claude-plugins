@@ -1,11 +1,17 @@
 {
   "extraKnownMarketplaces": {
     "xebcyp-plugins": {
-      "source": { "source": "github", "repo": "XEBCYP/claude-plugins" },
+      "source": {
+        "source": "git",
+        "url": "https://github.com/XEBCYP/claude-plugins.git"
+      },
       "autoUpdate": true
     },
     "claude-plugins-official": {
-      "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
+      "source": {
+        "source": "git",
+        "url": "https://github.com/anthropics/claude-plugins-official.git"
+      }
     }
   },
   "enabledPlugins": {
