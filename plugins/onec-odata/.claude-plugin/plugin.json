@@ -23,6 +23,7 @@
     "password": {
       "type": "string",
       "title": "Пароль пользователя 1С",
+      "description": "Хранится в защищённом хранилище Claude Code, в файлы не записывается.",
       "sensitive": true,
       "required": true
     }
