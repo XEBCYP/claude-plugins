@@ -1,0 +1,632 @@
+{
+  "$comment": "Соответствие объектов 1С иконкам. Имена проверены по lucide-static 1.49.0 и @tabler/icons 3.48.0.",
+  "versions": {
+    "lucide": "1.49.0",
+    "tabler": "3.48.0"
+  },
+  "groups": {
+    "meta": "Объекты метаданных 1С",
+    "v77": "Бухгалтерия и данные 1С 7.7",
+    "biz": "Бизнес-сущности и документы",
+    "status": "Состояния",
+    "cmd": "Стандартные команды"
+  },
+  "items": [
+    {
+      "group": "meta",
+      "id": "subsystem",
+      "ru": "Подсистема (раздел)",
+      "lucide": "folder",
+      "tabler": "folder"
+    },
+    {
+      "group": "meta",
+      "id": "constant",
+      "ru": "Константа",
+      "lucide": "pin",
+      "tabler": "pin"
+    },
+    {
+      "group": "meta",
+      "id": "catalog",
+      "ru": "Справочник",
+      "lucide": "book-open",
+      "tabler": "book"
+    },
+    {
+      "group": "meta",
+      "id": "catalog-folder",
+      "ru": "Группа справочника (папка)",
+      "lucide": "folder",
+      "tabler": "folder"
+    },
+    {
+      "group": "meta",
+      "id": "catalog-item",
+      "ru": "Элемент справочника",
+      "lucide": "file",
+      "tabler": "file"
+    },
+    {
+      "group": "meta",
+      "id": "document",
+      "ru": "Документ",
+      "lucide": "file-text",
+      "tabler": "file-text"
+    },
+    {
+      "group": "meta",
+      "id": "document-journal",
+      "ru": "Журнал документов",
+      "lucide": "files",
+      "tabler": "files"
+    },
+    {
+      "group": "meta",
+      "id": "enum",
+      "ru": "Перечисление",
+      "lucide": "list-ordered",
+      "tabler": "list-numbers"
+    },
+    {
+      "group": "meta",
+      "id": "report",
+      "ru": "Отчёт",
+      "lucide": "chart-column",
+      "tabler": "report-analytics"
+    },
+    {
+      "group": "meta",
+      "id": "data-processor",
+      "ru": "Обработка",
+      "lucide": "cog",
+      "tabler": "settings-automation"
+    },
+    {
+      "group": "meta",
+      "id": "chart-of-characteristic-types",
+      "ru": "План видов характеристик",
+      "lucide": "tags",
+      "tabler": "tags"
+    },
+    {
+      "group": "meta",
+      "id": "chart-of-accounts",
+      "ru": "План счетов",
+      "lucide": "list-tree",
+      "tabler": "list-tree"
+    },
+    {
+      "group": "meta",
+      "id": "chart-of-calculation-types",
+      "ru": "План видов расчёта",
+      "lucide": "percent",
+      "tabler": "percentage"
+    },
+    {
+      "group": "meta",
+      "id": "exchange-plan",
+      "ru": "План обмена",
+      "lucide": "arrow-left-right",
+      "tabler": "arrows-exchange"
+    },
+    {
+      "group": "meta",
+      "id": "information-register",
+      "ru": "Регистр сведений",
+      "lucide": "table",
+      "tabler": "table"
+    },
+    {
+      "group": "meta",
+      "id": "accumulation-register",
+      "ru": "Регистр накопления",
+      "lucide": "layers",
+      "tabler": "stack-2"
+    },
+    {
+      "group": "meta",
+      "id": "accounting-register",
+      "ru": "Регистр бухгалтерии",
+      "lucide": "book-open-check",
+      "tabler": "report-money"
+    },
+    {
+      "group": "meta",
+      "id": "calculation-register",
+      "ru": "Регистр расчёта",
+      "lucide": "calculator",
+      "tabler": "calculator"
+    },
+    {
+      "group": "meta",
+      "id": "business-process",
+      "ru": "Бизнес-процесс",
+      "lucide": "workflow",
+      "tabler": "sitemap"
+    },
+    {
+      "group": "meta",
+      "id": "task",
+      "ru": "Задача",
+      "lucide": "list-todo",
+      "tabler": "checklist"
+    },
+    {
+      "group": "meta",
+      "id": "common-module",
+      "ru": "Общий модуль",
+      "lucide": "code",
+      "tabler": "code"
+    },
+    {
+      "group": "meta",
+      "id": "role",
+      "ru": "Роль",
+      "lucide": "shield",
+      "tabler": "shield"
+    },
+    {
+      "group": "meta",
+      "id": "user",
+      "ru": "Пользователь",
+      "lucide": "user",
+      "tabler": "user"
+    },
+    {
+      "group": "meta",
+      "id": "external-data-source",
+      "ru": "Внешний источник данных",
+      "lucide": "plug",
+      "tabler": "plug"
+    },
+    {
+      "group": "meta",
+      "id": "event-log",
+      "ru": "Журнал регистрации",
+      "lucide": "history",
+      "tabler": "history"
+    },
+    {
+      "group": "v77",
+      "id": "operations-journal",
+      "ru": "Журнал операций (бухгалтерия 7.7)",
+      "lucide": "notebook-tabs",
+      "tabler": "clipboard-list"
+    },
+    {
+      "group": "v77",
+      "id": "posting",
+      "ru": "Операция / проводка",
+      "lucide": "arrow-right-left",
+      "tabler": "transfer"
+    },
+    {
+      "group": "v77",
+      "id": "trial-balance",
+      "ru": "Оборотно-сальдовая ведомость",
+      "lucide": "sheet",
+      "tabler": "table-export"
+    },
+    {
+      "group": "v77",
+      "id": "dbf-base",
+      "ru": "База DBF",
+      "lucide": "database",
+      "tabler": "database"
+    },
+    {
+      "group": "v77",
+      "id": "sql-export",
+      "ru": "Выгрузка в SQL",
+      "lucide": "database-backup",
+      "tabler": "database-export"
+    },
+    {
+      "group": "v77",
+      "id": "data-import",
+      "ru": "Загрузка данных",
+      "lucide": "file-input",
+      "tabler": "database-import"
+    },
+    {
+      "group": "biz",
+      "id": "organization",
+      "ru": "Организация",
+      "lucide": "building-2",
+      "tabler": "building"
+    },
+    {
+      "group": "biz",
+      "id": "counterparty",
+      "ru": "Контрагент",
+      "lucide": "handshake",
+      "tabler": "users-group"
+    },
+    {
+      "group": "biz",
+      "id": "customer",
+      "ru": "Покупатель",
+      "lucide": "shopping-cart",
+      "tabler": "shopping-cart"
+    },
+    {
+      "group": "biz",
+      "id": "supplier",
+      "ru": "Поставщик",
+      "lucide": "truck",
+      "tabler": "truck"
+    },
+    {
+      "group": "biz",
+      "id": "product",
+      "ru": "Номенклатура (товар)",
+      "lucide": "package",
+      "tabler": "package"
+    },
+    {
+      "group": "biz",
+      "id": "barcode",
+      "ru": "Штрихкод",
+      "lucide": "scan-barcode",
+      "tabler": "barcode"
+    },
+    {
+      "group": "biz",
+      "id": "warehouse",
+      "ru": "Склад",
+      "lucide": "warehouse",
+      "tabler": "building-warehouse"
+    },
+    {
+      "group": "biz",
+      "id": "stock",
+      "ru": "Остатки товаров",
+      "lucide": "boxes",
+      "tabler": "packages"
+    },
+    {
+      "group": "biz",
+      "id": "goods-receipt",
+      "ru": "Поступление товаров",
+      "lucide": "package-plus",
+      "tabler": "truck-loading"
+    },
+    {
+      "group": "biz",
+      "id": "sale",
+      "ru": "Реализация (отгрузка)",
+      "lucide": "package-check",
+      "tabler": "truck-delivery"
+    },
+    {
+      "group": "biz",
+      "id": "invoice",
+      "ru": "Счёт на оплату",
+      "lucide": "receipt-text",
+      "tabler": "file-invoice"
+    },
+    {
+      "group": "biz",
+      "id": "tax-invoice",
+      "ru": "Счёт-фактура",
+      "lucide": "receipt-russian-ruble",
+      "tabler": "invoice"
+    },
+    {
+      "group": "biz",
+      "id": "cash",
+      "ru": "Касса (ПКО, РКО)",
+      "lucide": "wallet",
+      "tabler": "cash-register"
+    },
+    {
+      "group": "biz",
+      "id": "bank",
+      "ru": "Банк, выписка",
+      "lucide": "landmark",
+      "tabler": "building-bank"
+    },
+    {
+      "group": "biz",
+      "id": "payment-order",
+      "ru": "Платёжное поручение",
+      "lucide": "banknote",
+      "tabler": "credit-card-pay"
+    },
+    {
+      "group": "biz",
+      "id": "settlements",
+      "ru": "Взаиморасчёты, долги",
+      "lucide": "scale",
+      "tabler": "scale"
+    },
+    {
+      "group": "biz",
+      "id": "tax",
+      "ru": "Налоги, НДС",
+      "lucide": "percent",
+      "tabler": "receipt-tax"
+    },
+    {
+      "group": "biz",
+      "id": "rub",
+      "ru": "Сумма в рублях",
+      "lucide": "russian-ruble",
+      "tabler": "currency-ruble"
+    },
+    {
+      "group": "biz",
+      "id": "currency",
+      "ru": "Валюта",
+      "lucide": "coins",
+      "tabler": "coins"
+    },
+    {
+      "group": "biz",
+      "id": "price",
+      "ru": "Цена, прайс",
+      "lucide": "tag",
+      "tabler": "tag"
+    },
+    {
+      "group": "biz",
+      "id": "discount",
+      "ru": "Скидка",
+      "lucide": "badge-percent",
+      "tabler": "discount"
+    },
+    {
+      "group": "biz",
+      "id": "employee",
+      "ru": "Сотрудник",
+      "lucide": "id-card",
+      "tabler": "id-badge-2"
+    },
+    {
+      "group": "biz",
+      "id": "payroll",
+      "ru": "Зарплата",
+      "lucide": "hand-coins",
+      "tabler": "report-money"
+    },
+    {
+      "group": "biz",
+      "id": "contract",
+      "ru": "Договор",
+      "lucide": "file-signature",
+      "tabler": "contract"
+    },
+    {
+      "group": "biz",
+      "id": "stamp",
+      "ru": "Печать организации",
+      "lucide": "stamp",
+      "tabler": "rubber-stamp"
+    },
+    {
+      "group": "biz",
+      "id": "fixed-assets",
+      "ru": "Основные средства",
+      "lucide": "factory",
+      "tabler": "building-factory-2"
+    },
+    {
+      "group": "biz",
+      "id": "dashboard",
+      "ru": "Дэшборд",
+      "lucide": "layout-dashboard",
+      "tabler": "layout-dashboard"
+    },
+    {
+      "group": "status",
+      "id": "posted",
+      "ru": "Проведён",
+      "lucide": "circle-check",
+      "tabler": "circle-check"
+    },
+    {
+      "group": "status",
+      "id": "not-posted",
+      "ru": "Записан, не проведён",
+      "lucide": "circle-dashed",
+      "tabler": "circle-dashed"
+    },
+    {
+      "group": "status",
+      "id": "marked-for-deletion",
+      "ru": "Помечен на удаление",
+      "lucide": "trash-2",
+      "tabler": "trash-x"
+    },
+    {
+      "group": "status",
+      "id": "error",
+      "ru": "Ошибка",
+      "lucide": "circle-alert",
+      "tabler": "alert-circle"
+    },
+    {
+      "group": "status",
+      "id": "warning",
+      "ru": "Предупреждение",
+      "lucide": "triangle-alert",
+      "tabler": "alert-triangle"
+    },
+    {
+      "group": "status",
+      "id": "sync",
+      "ru": "Синхронизация",
+      "lucide": "refresh-cw",
+      "tabler": "refresh"
+    },
+    {
+      "group": "status",
+      "id": "offline",
+      "ru": "Нет сети",
+      "lucide": "wifi-off",
+      "tabler": "wifi-off"
+    },
+    {
+      "group": "status",
+      "id": "loading",
+      "ru": "Загрузка",
+      "lucide": "loader-circle",
+      "tabler": "loader-2"
+    },
+    {
+      "group": "cmd",
+      "id": "create",
+      "ru": "Создать",
+      "lucide": "plus",
+      "tabler": "plus"
+    },
+    {
+      "group": "cmd",
+      "id": "copy",
+      "ru": "Скопировать",
+      "lucide": "copy",
+      "tabler": "copy"
+    },
+    {
+      "group": "cmd",
+      "id": "edit",
+      "ru": "Изменить",
+      "lucide": "square-pen",
+      "tabler": "edit"
+    },
+    {
+      "group": "cmd",
+      "id": "delete",
+      "ru": "Удалить",
+      "lucide": "trash-2",
+      "tabler": "trash"
+    },
+    {
+      "group": "cmd",
+      "id": "post",
+      "ru": "Провести",
+      "lucide": "check",
+      "tabler": "check"
+    },
+    {
+      "group": "cmd",
+      "id": "unpost",
+      "ru": "Отмена проведения",
+      "lucide": "undo-2",
+      "tabler": "arrow-back-up"
+    },
+    {
+      "group": "cmd",
+      "id": "save",
+      "ru": "Записать",
+      "lucide": "save",
+      "tabler": "device-floppy"
+    },
+    {
+      "group": "cmd",
+      "id": "print",
+      "ru": "Печать",
+      "lucide": "printer",
+      "tabler": "printer"
+    },
+    {
+      "group": "cmd",
+      "id": "search",
+      "ru": "Найти",
+      "lucide": "search",
+      "tabler": "search"
+    },
+    {
+      "group": "cmd",
+      "id": "filter",
+      "ru": "Отбор",
+      "lucide": "funnel",
+      "tabler": "filter"
+    },
+    {
+      "group": "cmd",
+      "id": "sort",
+      "ru": "Сортировка",
+      "lucide": "arrow-up-down",
+      "tabler": "arrows-sort"
+    },
+    {
+      "group": "cmd",
+      "id": "refresh",
+      "ru": "Обновить",
+      "lucide": "refresh-cw",
+      "tabler": "refresh"
+    },
+    {
+      "group": "cmd",
+      "id": "create-based-on",
+      "ru": "Создать на основании",
+      "lucide": "copy-plus",
+      "tabler": "copy-plus"
+    },
+    {
+      "group": "cmd",
+      "id": "hierarchy",
+      "ru": "Иерархия",
+      "lucide": "folder-tree",
+      "tabler": "hierarchy-2"
+    },
+    {
+      "group": "cmd",
+      "id": "export-file",
+      "ru": "Выгрузить в файл",
+      "lucide": "file-down",
+      "tabler": "file-download"
+    },
+    {
+      "group": "cmd",
+      "id": "import-file",
+      "ru": "Загрузить из файла",
+      "lucide": "file-up",
+      "tabler": "file-upload"
+    },
+    {
+      "group": "cmd",
+      "id": "excel",
+      "ru": "Excel",
+      "lucide": "file-spreadsheet",
+      "tabler": "file-spreadsheet"
+    },
+    {
+      "group": "cmd",
+      "id": "period",
+      "ru": "Период",
+      "lucide": "calendar-range",
+      "tabler": "calendar-month"
+    },
+    {
+      "group": "cmd",
+      "id": "more",
+      "ru": "Ещё",
+      "lucide": "ellipsis-vertical",
+      "tabler": "dots-vertical"
+    },
+    {
+      "group": "cmd",
+      "id": "close",
+      "ru": "Закрыть",
+      "lucide": "x",
+      "tabler": "x"
+    },
+    {
+      "group": "cmd",
+      "id": "settings",
+      "ru": "Настройки",
+      "lucide": "settings",
+      "tabler": "settings"
+    },
+    {
+      "group": "cmd",
+      "id": "logout",
+      "ru": "Выход",
+      "lucide": "log-out",
+      "tabler": "logout"
+    }
+  ]
+}

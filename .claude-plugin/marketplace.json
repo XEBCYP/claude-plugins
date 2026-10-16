@@ -59,6 +59,12 @@
       "description": "SQL-запросы, анализ данных, графики и интерактивные дэшборды (скиллы плагина Data от Anthropic, без внешних коннекторов).",
       "category": "data",
       "source": "./plugins/data-skills"
+    },
+    {
+      "name": "ui-icons",
+      "description": "Иконки для интерфейсов: Lucide по умолчанию, Tabler для бизнес-иконок; React, HTML, офлайн-PWA (SVG-спрайт) и соответствие объектов 1С иконкам.",
+      "category": "design",
+      "source": "./plugins/ui-icons"
     }
   ]
 }

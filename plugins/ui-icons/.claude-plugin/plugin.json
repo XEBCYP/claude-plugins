@@ -1,0 +1,10 @@
+{
+  "name": "ui-icons",
+  "description": "Иконки для интерфейсов: Lucide по умолчанию, Tabler для бизнес-иконок; React, HTML, офлайн-PWA (SVG-спрайт) и соответствие объектов 1С иконкам.",
+  "version": "1.0.0",
+  "author": {
+    "name": "XEBCYP"
+  },
+  "license": "MIT",
+  "keywords": ["icons", "lucide", "tabler", "pwa", "react", "1c", "dashboard"]
+}

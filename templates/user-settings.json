@@ -19,6 +19,7 @@
     "bsl-language-server@xebcyp-plugins": true,
     "data-skills@xebcyp-plugins": true,
     "frontend-design@claude-plugins-official": true,
+    "ui-icons@xebcyp-plugins": true,
     "dbhub@xebcyp-plugins": false,
     "onec-odata@xebcyp-plugins": false
   }

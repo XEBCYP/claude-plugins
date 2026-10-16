@@ -15,6 +15,7 @@
 | `dbhub` | [bytebase/dbhub](https://github.com/bytebase/dbhub) `2dbf01a`, каталог `plugin/` (MIT) | Чисто |
 | `onec-odata` | свой плагин; запускает npm-пакет `@theyahia/aprovodka@4.3.0` (MIT) | Чисто, с оговоркой |
 | `data-skills` | копия `data/` из [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins) `33eeda1` (Apache-2.0) | Чисто; внешние коннекторы удалены |
+| `ui-icons` | свой плагин; скрипт `icons.py` скачивает `lucide-static@1.49.0` и `@tabler/icons@3.48.0` с registry.npmjs.org | Чисто; архив проверяется по sha512 из реестра, распаковывается только в память |
 | `frontend-design` | официальный маркетплейс Anthropic `claude-plugins-official` | Один SKILL.md без кода |
 
 ## Подробности
