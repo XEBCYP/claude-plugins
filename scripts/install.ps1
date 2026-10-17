@@ -1,6 +1,7 @@
 ﻿# Подключает маркетплейс xebcyp-plugins к Claude Code на этом компьютере (Windows).
 # Дописывает в ~/.claude/settings.json маркетплейсы и включённые плагины из
 # templates/user-settings.json. Уже заданные ключи не трогает, делает резервную копию.
+# Навыки 1С глобально выключены — их включает .claude/settings.json проекта 1С.
 # В ~/.claude/CLAUDE.md ставит или обновляет блок общих правил из templates/user-CLAUDE.md.
 #
 # Запуск:

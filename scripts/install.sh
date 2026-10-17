@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Подключает маркетплейс xebcyp-plugins к Claude Code (Linux / macOS).
-# На Linux/macOS включает Python-версию навыков 1С (1c-skills-py) вместо PowerShell-версии.
+# Навыки 1С (1c-skills, 1c-skills-py) глобально выключены — их включает .claude/settings.json проекта 1С.
 # В ~/.claude/CLAUDE.md ставит или обновляет блок общих правил из templates/user-CLAUDE.md.
 #
 #   curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/install.sh | bash
@@ -17,10 +17,6 @@ TEMPLATE="$TEMPLATE" python3 - "$CLAUDE_DIR/settings.json" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 template = json.loads(os.environ["TEMPLATE"])
-plugins = template["enabledPlugins"]
-# PowerShell-версия навыков 1С здесь не нужна — ставим Python-порт.
-plugins.pop("1c-skills@xebcyp-plugins", None)
-plugins["1c-skills-py@xebcyp-plugins"] = True
 settings = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
 added = []
 for section in ("extraKnownMarketplaces", "enabledPlugins"):
