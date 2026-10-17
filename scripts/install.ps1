@@ -151,8 +151,12 @@ if (Test-Path $mdPath) {
 
 # Доступ git к GitHub без запроса пароля (нужен для приватных маркетплейсов и автообновления).
 if (Get-Command gh -ErrorAction SilentlyContinue) {
+    # В PowerShell 5.1 при 'Stop' даже перенаправленный stderr внешней программы прерывает скрипт,
+    # а gh без входа пишет туда «You are not logged into any GitHub hosts».
+    $ErrorActionPreference = 'Continue'
     gh auth status *> $null
     if ($LASTEXITCODE -eq 0) { gh auth setup-git }
+    $ErrorActionPreference = 'Stop'
 }
 
 foreach ($tool in 'node', 'python', 'git') {
