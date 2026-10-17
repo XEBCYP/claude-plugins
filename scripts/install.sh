@@ -59,7 +59,7 @@ BLOCK="$(template user-CLAUDE.md)"
 BLOCK="$BLOCK" python3 - "$CLAUDE_DIR/CLAUDE.md" <<'PY'
 import os, re, shutil, sys, time
 path = sys.argv[1]
-block = os.environ["BLOCK"].strip()
+block = os.environ["BLOCK"].replace("\r\n", "\n").strip()  # клон с autocrlf даёт CRLF
 pattern = re.compile(r"<!-- xebcyp-plugins:begin.*?<!-- xebcyp-plugins:end -->", re.S)
 if os.path.exists(path):
     md = open(path, encoding="utf-8").read()

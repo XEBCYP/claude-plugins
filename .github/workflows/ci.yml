@@ -25,7 +25,7 @@ jobs:
 
       - name: claude plugin validate --strict
         run: |
-          npm install -g @anthropic-ai/claude-code
+          npm install -g @anthropic-ai/claude-code@2.1.299
           claude plugin validate --strict .
           for d in plugins/*/; do claude plugin validate --strict "$d"; done
 
