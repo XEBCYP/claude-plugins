@@ -53,7 +53,14 @@ else:
     print("Создан", path)
 PY
 
-python3 -c 'import lxml, PIL, psutil' 2>/dev/null || python3 -m pip install --user -q 'lxml>=4.9.0' 'Pillow>=10.0.0' 'psutil>=5.9.0' || true
+# Пакеты для 1c-skills-py. На Debian 12 / Ubuntu 23.04+ (PEP 668) обычный --user запрещён — пробуем с
+# --break-system-packages, затем без --user (внутри venv); не вышло — говорим об этом.
+PKGS=('lxml>=4.9.0' 'Pillow>=10.0.0' 'psutil>=5.9.0')
+python3 -c 'import lxml, PIL, psutil' 2>/dev/null \
+  || python3 -m pip install --user -q "${PKGS[@]}" 2>/dev/null \
+  || python3 -m pip install --user -q --break-system-packages "${PKGS[@]}" 2>/dev/null \
+  || python3 -m pip install -q "${PKGS[@]}" 2>/dev/null \
+  || echo "Внимание: не удалось поставить lxml, Pillow, psutil — навыки 1c-skills-py работать не будут." >&2
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then gh auth setup-git; fi
 for t in node python3 git unzip; do command -v "$t" >/dev/null || echo "Внимание: не найден $t"; done
 echo "Готово. Перезапустите Claude Code."
