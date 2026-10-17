@@ -58,3 +58,12 @@ curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/
 1. Проверьте новый коммит исходного репозитория.
 2. Поменяйте `sha` в [.claude-plugin/marketplace.json](.claude-plugin/marketplace.json) и запишите итог в AUDIT.md.
 3. Закоммитьте — у всех подключённых компьютеров плагин обновится при следующем старте.
+
+## Выпуск версии
+
+Любая правка своего плагина (`plugins/<плагин>/`) — новая версия: Claude Code хранит плагин по номеру версии
+и без новой версии правку не подхватит.
+
+1. Поднимите `version` в `plugins/<плагин>/.claude-plugin/plugin.json` и запишите изменение в [CHANGELOG.md](CHANGELOG.md).
+2. После вливания в `main`: `claude plugin tag plugins/<плагин> --push` — создаёт и отправляет тег
+   `<плагин>--v<версия>`, проверяя, что манифест и маркетплейс согласованы.
