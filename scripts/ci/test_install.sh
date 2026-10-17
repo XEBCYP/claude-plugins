@@ -21,7 +21,7 @@ before="$(cat "$TMP/fresh/settings.json" "$TMP/fresh/CLAUDE.md" | md5sum)"
 install_in "$TMP/fresh" "$@"
 after="$(cat "$TMP/fresh/settings.json" "$TMP/fresh/CLAUDE.md" | md5sum)"
 [ "$before" = "$after" ] || { echo "файлы изменились при повторном запуске"; exit 1; }
-if ls "$TMP/fresh" | grep -q '\.bak-'; then echo "лишняя резервная копия:"; ls "$TMP/fresh"; exit 1; fi
+if compgen -G "$TMP/fresh/*.bak-*" >/dev/null; then echo "лишняя резервная копия:"; ls "$TMP/fresh"; exit 1; fi
 
 echo "== установка поверх старых настроек"
 mkdir -p "$TMP/seeded"
@@ -29,6 +29,6 @@ cp "$HERE/seed-settings.json" "$TMP/seeded/settings.json"
 printf '# Мой текст\n\nправило\n' > "$TMP/seeded/CLAUDE.md"
 install_in "$TMP/seeded" "$@"
 "$PY" "$HERE/check_install.py" "$(winpath "$TMP/seeded")" --seeded
-ls "$TMP/seeded" | grep -q 'settings.json.bak-' || { echo "нет резервной копии изменённого settings.json"; exit 1; }
+compgen -G "$TMP/seeded/settings.json.bak-*" >/dev/null || { echo "нет резервной копии изменённого settings.json"; exit 1; }
 
 echo "Установщик прошёл все проверки: $*"
