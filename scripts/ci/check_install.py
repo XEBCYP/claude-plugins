@@ -10,6 +10,10 @@ import json
 import os
 import sys
 
+# Консоль раннера Windows — cp1252; без этого print с кириллицей падает (UnicodeEncodeError).
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

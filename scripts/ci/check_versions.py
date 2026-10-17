@@ -10,6 +10,10 @@ import json
 import subprocess
 import sys
 
+# Консоль раннера Windows — cp1252; без этого print с кириллицей падает (UnicodeEncodeError).
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 
 def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8")

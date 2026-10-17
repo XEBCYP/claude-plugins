@@ -10,6 +10,10 @@ import subprocess
 import sys
 from urllib.parse import unquote
 
+# Консоль раннера Windows — cp1252; без этого print с кириллицей падает (UnicodeEncodeError).
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
