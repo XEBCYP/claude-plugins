@@ -21,13 +21,13 @@ template() {
 }
 
 TEMPLATE="$(template user-settings.json)"
-[ -f "$CLAUDE_DIR/settings.json" ] && cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.bak-$(date +%Y%m%d-%H%M%S)"
-
 TEMPLATE="$TEMPLATE" python3 - "$CLAUDE_DIR/settings.json" <<'PY'
-import json, os, sys
+import copy, json, os, shutil, sys, time
 path = sys.argv[1]
 template = json.loads(os.environ["TEMPLATE"])
-settings = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+# utf-8-sig: файл, сохранённый в Windows с BOM, тоже читается.
+settings = json.load(open(path, encoding="utf-8-sig")) if os.path.exists(path) else {}
+original = copy.deepcopy(settings) if os.path.exists(path) else None
 OWN = "xebcyp-plugins"
 added, updated, differs = [], [], []
 for section in ("extraKnownMarketplaces", "enabledPlugins"):
@@ -41,9 +41,13 @@ for section in ("extraKnownMarketplaces", "enabledPlugins"):
             updated.append(f"{section}.{k}.source")
         elif dst[k] != v:
             differs.append(f"{section}.{k}: у вас {json.dumps(dst[k], ensure_ascii=False)}, в шаблоне {json.dumps(v, ensure_ascii=False)}")
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(settings, f, ensure_ascii=False, indent=2)
-    f.write("\n")
+# Резервная копия и запись — только если содержимое меняется.
+if settings != original:
+    if original is not None:
+        shutil.copy(path, path + time.strftime(".bak-%Y%m%d-%H%M%S"))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 if added: print("Добавлено:", *added, sep="\n  + ")
 if updated: print("Обновлено:", *updated, sep="\n  ~ ")
 if not (added or updated): print("Всё уже было настроено.")

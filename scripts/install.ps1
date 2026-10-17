@@ -9,7 +9,46 @@
 # или из клона репозитория:
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
+# Всё тело — в блоке & { }: при запуске через irm | iex настройки ($ErrorActionPreference и др.)
+# не остаются в окне пользователя.
+& {
 $ErrorActionPreference = 'Stop'
+
+# JSON с отступом в 2 пробела и без \u-экранирования & < > ' — одинаково в PowerShell 5.1 и 7
+# (ConvertTo-Json в 5.1 экранирует эти символы и ставит огромные отступы).
+function ToJson($v, [string]$ind = '') {
+    $in = $ind + '  '
+    if ($null -eq $v) { return 'null' }
+    if ($v -is [bool]) { return $(if ($v) { 'true' } else { 'false' }) }
+    if ($v -is [datetime]) { $v = $v.ToString('yyyy-MM-ddTHH:mm:ss.FFFFFFFK') }
+    if ($v -is [string]) {
+        $sb = New-Object System.Text.StringBuilder '"'
+        foreach ($c in $v.ToCharArray()) {
+            switch ([int]$c) {
+                34 { [void]$sb.Append('\"') }
+                92 { [void]$sb.Append('\\') }
+                8 { [void]$sb.Append('\b') }
+                12 { [void]$sb.Append('\f') }
+                10 { [void]$sb.Append('\n') }
+                13 { [void]$sb.Append('\r') }
+                9 { [void]$sb.Append('\t') }
+                default {
+                    if ([int]$c -lt 32) { [void]$sb.AppendFormat('\u{0:x4}', [int]$c) } else { [void]$sb.Append($c) }
+                }
+            }
+        }
+        return $sb.Append('"').ToString()
+    }
+    if ($v -is [double] -or $v -is [single]) { return $v.ToString('R', [Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [ValueType]) { return [Convert]::ToString($v, [Globalization.CultureInfo]::InvariantCulture) }
+    if ($v -is [System.Collections.IList]) {
+        if ($v.Count -eq 0) { return '[]' }
+        return "[`n" + ((@($v) | ForEach-Object { $in + (ToJson $_ $in) }) -join ",`n") + "`n$ind]"
+    }
+    $props = @($v.PSObject.Properties)
+    if ($props.Count -eq 0) { return '{}' }
+    return "{`n" + (($props | ForEach-Object { $in + (ToJson $_.Name) + ': ' + (ToJson $_.Value $in) }) -join ",`n") + "`n$ind}"
+}
 
 $templateUrl = 'https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/templates/user-settings.json'
 $localTemplate = if ($PSScriptRoot) { Join-Path $PSScriptRoot '..\templates\user-settings.json' } else { $null }
@@ -24,16 +63,17 @@ $claudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-
 $settingsPath = Join-Path $claudeDir 'settings.json'
 New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null
 
+$origJson = $null
 if (Test-Path $settingsPath) {
-    Copy-Item $settingsPath "$settingsPath.bak-$(Get-Date -Format yyyyMMdd-HHmmss)"
-    $settings = Get-Content $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $origJson = [System.IO.File]::ReadAllText($settingsPath, [System.Text.Encoding]::UTF8)
+    $settings = $origJson | ConvertFrom-Json
 } else {
     $settings = [pscustomobject]@{}
 }
 
 $own = 'xebcyp-plugins'
 $added = @(); $updated = @(); $differs = @()
-function Compact($v) { $v | ConvertTo-Json -Depth 32 -Compress }
+function Compact($v) { ToJson $v }
 foreach ($section in 'extraKnownMarketplaces', 'enabledPlugins') {
     if (-not $settings.PSObject.Properties[$section]) {
         $settings | Add-Member -NotePropertyName $section -NotePropertyValue ([pscustomobject]@{})
@@ -54,8 +94,12 @@ foreach ($section in 'extraKnownMarketplaces', 'enabledPlugins') {
     }
 }
 
-$json = $settings | ConvertTo-Json -Depth 32
-[System.IO.File]::WriteAllText($settingsPath, $json + "`n", (New-Object System.Text.UTF8Encoding $false))
+$json = (ToJson $settings) + "`n"
+# Резервная копия и запись — только если содержимое меняется (сравнение без учёта форматирования).
+if ($null -eq $origJson -or (ToJson ($origJson | ConvertFrom-Json)) + "`n" -ne $json) {
+    if ($null -ne $origJson) { Copy-Item $settingsPath "$settingsPath.bak-$(Get-Date -Format yyyyMMdd-HHmmss)" }
+    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding $false))
+}
 
 if ($added) {
     Write-Host 'Добавлено в' $settingsPath ':'
@@ -117,3 +161,4 @@ foreach ($tool in 'node', 'python', 'git') {
     }
 }
 Write-Host 'Готово. Перезапустите Claude Code — плагины установятся при старте сессии.'
+}
