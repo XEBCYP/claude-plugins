@@ -6,11 +6,21 @@
 #   curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/install.sh | bash
 set -euo pipefail
 
-TEMPLATE_URL="https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/templates/user-settings.json"
+BASE_URL="https://raw.githubusercontent.com/XEBCYP/claude-plugins/main"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$CLAUDE_DIR"
 
-TEMPLATE="$(curl -fsSL "$TEMPLATE_URL")"
+# Запуск из клона — шаблоны берутся рядом (можно проверить правку до пуша); через curl | bash — из main.
+SRC_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+template() {
+  if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/templates/$1" ]; then cat "$SRC_DIR/templates/$1"
+  else curl -fsSL "$BASE_URL/templates/$1"; fi
+}
+
+TEMPLATE="$(template user-settings.json)"
 [ -f "$CLAUDE_DIR/settings.json" ] && cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.bak-$(date +%Y%m%d-%H%M%S)"
 
 TEMPLATE="$TEMPLATE" python3 - "$CLAUDE_DIR/settings.json" <<'PY'
@@ -18,22 +28,30 @@ import json, os, sys
 path = sys.argv[1]
 template = json.loads(os.environ["TEMPLATE"])
 settings = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
-added = []
+OWN = "xebcyp-plugins"
+added, updated, differs = [], [], []
 for section in ("extraKnownMarketplaces", "enabledPlugins"):
     dst = settings.setdefault(section, {})
     for k, v in template[section].items():
         if k not in dst:
             dst[k] = v
             added.append(f"{section}.{k}")
+        elif section == "extraKnownMarketplaces" and k == OWN and dst[k].get("source") != v["source"]:
+            dst[k]["source"] = v["source"]  # адрес своего маркетплейса — всегда из шаблона
+            updated.append(f"{section}.{k}.source")
+        elif dst[k] != v:
+            differs.append(f"{section}.{k}: у вас {json.dumps(dst[k], ensure_ascii=False)}, в шаблоне {json.dumps(v, ensure_ascii=False)}")
 with open(path, "w", encoding="utf-8") as f:
     json.dump(settings, f, ensure_ascii=False, indent=2)
     f.write("\n")
-print("Добавлено:" if added else "Всё уже было настроено.", *added, sep="\n  + ")
+if added: print("Добавлено:", *added, sep="\n  + ")
+if updated: print("Обновлено:", *updated, sep="\n  ~ ")
+if not (added or updated): print("Всё уже было настроено.")
+if differs: print("Отличается от шаблона (оставлено как есть):", *differs, sep="\n  = ")
 PY
 
 # Общие правила в ~/.claude/CLAUDE.md: блок между метками ставится или заменяется, остальной текст не трогается.
-MD_URL="https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/templates/user-CLAUDE.md"
-BLOCK="$(curl -fsSL "$MD_URL")"
+BLOCK="$(template user-CLAUDE.md)"
 BLOCK="$BLOCK" python3 - "$CLAUDE_DIR/CLAUDE.md" <<'PY'
 import os, re, shutil, sys, time
 path = sys.argv[1]

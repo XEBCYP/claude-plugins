@@ -31,15 +31,25 @@ if (Test-Path $settingsPath) {
     $settings = [pscustomobject]@{}
 }
 
-$added = @()
+$own = 'xebcyp-plugins'
+$added = @(); $updated = @(); $differs = @()
+function Compact($v) { $v | ConvertTo-Json -Depth 32 -Compress }
 foreach ($section in 'extraKnownMarketplaces', 'enabledPlugins') {
     if (-not $settings.PSObject.Properties[$section]) {
         $settings | Add-Member -NotePropertyName $section -NotePropertyValue ([pscustomobject]@{})
     }
     foreach ($p in $template.$section.PSObject.Properties) {
-        if (-not $settings.$section.PSObject.Properties[$p.Name]) {
+        $cur = $settings.$section.PSObject.Properties[$p.Name]
+        if (-not $cur) {
             $settings.$section | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value
             $added += "$section.$($p.Name)"
+        } elseif ($section -eq 'extraKnownMarketplaces' -and $p.Name -eq $own -and
+                  (Compact $cur.Value.source) -ne (Compact $p.Value.source)) {
+            # Адрес своего маркетплейса — всегда из шаблона.
+            $cur.Value | Add-Member -NotePropertyName source -NotePropertyValue $p.Value.source -Force
+            $updated += "$section.$($p.Name).source"
+        } elseif ((Compact $cur.Value) -ne (Compact $p.Value)) {
+            $differs += "$section.$($p.Name): у вас $(Compact $cur.Value), в шаблоне $(Compact $p.Value)"
         }
     }
 }
@@ -50,8 +60,17 @@ $json = $settings | ConvertTo-Json -Depth 32
 if ($added) {
     Write-Host 'Добавлено в' $settingsPath ':'
     $added | ForEach-Object { Write-Host '  +' $_ }
-} else {
+}
+if ($updated) {
+    Write-Host 'Обновлено в' $settingsPath ':'
+    $updated | ForEach-Object { Write-Host '  ~' $_ }
+}
+if (-not ($added -or $updated)) {
     Write-Host 'Всё уже было настроено:' $settingsPath
+}
+if ($differs) {
+    Write-Host 'Отличается от шаблона (оставлено как есть):'
+    $differs | ForEach-Object { Write-Host '  =' $_ }
 }
 
 # Общие правила в ~/.claude/CLAUDE.md: блок между метками ставится или заменяется, остальной текст не трогается.
