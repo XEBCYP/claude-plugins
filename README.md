@@ -33,6 +33,10 @@ curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/
 делает резервную копию), а в `~/.claude/CLAUDE.md` — блок общих правил из [templates/user-CLAUDE.md](templates/user-CLAUDE.md)
 между метками `xebcyp-plugins:begin/end`: повторный запуск обновляет только этот блок, ваш текст вне его не трогается. После перезапуска Claude Code плагины установятся сами и будут обновляться.
 
+Если установлен и авторизован GitHub CLI (`gh`), скрипт выполняет `gh auth setup-git`: в глобальный `~/.gitconfig`
+записывается `gh` как помощник учётных данных для github.com — тогда git обновляет маркетплейсы без запроса пароля.
+Не нужно — удалите после установки строки `credential "https://github.com"` из `~/.gitconfig`.
+
 Вручную: `/plugin marketplace add https://github.com/XEBCYP/claude-plugins.git`, затем `/plugin install <плагин>@xebcyp-plugins`.
 
 ## Облачные сессии и проекты
