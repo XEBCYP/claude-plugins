@@ -77,3 +77,7 @@ curl -fsSL https://raw.githubusercontent.com/XEBCYP/claude-plugins/main/scripts/
 1. Поднимите `version` в `plugins/<плагин>/.claude-plugin/plugin.json` и запишите изменение в [CHANGELOG.md](CHANGELOG.md).
 2. После вливания в `main`: `claude plugin tag plugins/<плагин> --push` — создаёт и отправляет тег
    `<плагин>--v<версия>`, проверяя, что манифест и маркетплейс согласованы.
+
+## Решения
+
+Почему сделано так (HTTPS, закрепление по коммиту, запись в 1С с подтверждением, навыки 1С в проектах) — в [docs/adr/](docs/adr/).
