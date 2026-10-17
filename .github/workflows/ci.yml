@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Манифесты, JSON, ссылки, версии, shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: claude plugin validate --strict
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate --strict .
+          for d in plugins/*/; do claude plugin validate --strict "$d"; done
+
+      - name: JSON разбирается
+        run: git ls-files -z '*.json' | xargs -0 -n1 python -m json.tool > /dev/null
+
+      - name: Ссылки в Markdown
+        run: python scripts/ci/check_links.py
+
+      - name: Изменённый плагин — новая версия
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
+            echo "Нет базы для сравнения — пропуск"; exit 0
+          fi
+          python scripts/ci/check_versions.py "$BASE"
+
+      - name: shellcheck
+        run: shellcheck scripts/install.sh scripts/ci/test_install.sh
+
+  install-linux:
+    name: install.sh (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: bash scripts/ci/test_install.sh bash scripts/install.sh
+
+  install-windows:
+    name: install.ps1 (Windows, PowerShell 5.1 и 7)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $r = Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error
+          $r | Format-Table -AutoSize | Out-String | Write-Host
+          if ($r | Where-Object Severity -eq 'Error') { exit 1 }
+      - name: PowerShell 5.1
+        shell: bash
+        run: bash scripts/ci/test_install.sh powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+      - name: PowerShell 7
+        shell: bash
+        run: bash scripts/ci/test_install.sh pwsh -NoProfile -File scripts/install.ps1
