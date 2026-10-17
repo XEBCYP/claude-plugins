@@ -2,7 +2,7 @@
 
 Claude Code хранит свой плагин по полю version, и без новой версии правка не доходит до машин, где он уже стоит.
 Для каждого plugins/<плагин>/, где есть изменения между BASE и HEAD, версия в plugin.json должна отличаться
-от версии в BASE (новый плагин — проверка не нужна).
+от версии в BASE (новый плагин — проверка не нужна; правки только в evals/ не считаются).
 
     python scripts/ci/check_versions.py <base-ref>
 """
@@ -25,7 +25,8 @@ def main():
     diff = git("diff", "--name-only", f"{base}...HEAD", "--", "plugins/")
     if diff.returncode != 0:
         sys.exit(f"git diff {base}...HEAD: {diff.stderr.strip()}")
-    plugins = sorted({p.split("/")[1] for p in diff.stdout.split() if p.count("/") >= 2})
+    # evals/ — тесты навыков, на поведение установленного плагина не влияют.
+    plugins = sorted({p.split("/")[1] for p in diff.stdout.split() if p.count("/") >= 2 and p.split("/")[2] != "evals"})
     bad = []
     for plugin in plugins:
         old, new = version_at(base, plugin), version_at("HEAD", plugin)
