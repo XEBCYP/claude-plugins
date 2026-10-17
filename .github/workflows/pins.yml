@@ -1,0 +1,42 @@
+name: Закрепления сторонних плагинов
+
+# Раз в неделю: не вышли ли новые коммиты сторонних плагинов и новая версия aprovodka.
+# Ничего не обновляет — при расхождении открывает (или дополняет) issue «проверить и обновить».
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Сравнить закрепления с источниками
+        id: check
+        run: |
+          set +e
+          python scripts/ci/check_pins.py > report.md
+          code=$?
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" -eq 3 ] && echo "stale=true" >> "$GITHUB_OUTPUT"
+          [ "$code" -eq 0 ] || [ "$code" -eq 3 ]
+      - name: Issue «проверить и обновить»
+        if: steps.check.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Сторонние плагины: есть новые версии — проверить и обновить"
+          num=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body-file report.md
+          else
+            gh issue create --title "$title" --body-file report.md
+          fi
