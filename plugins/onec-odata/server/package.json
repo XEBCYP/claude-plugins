@@ -1,0 +1,7 @@
+{
+  "name": "onec-odata-server",
+  "private": true,
+  "dependencies": {
+    "@theyahia/aprovodka": "4.3.0"
+  }
+}

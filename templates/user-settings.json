@@ -15,7 +15,8 @@
     }
   },
   "enabledPlugins": {
-    "1c-skills@xebcyp-plugins": true,
+    "1c-skills@xebcyp-plugins": false,
+    "1c-skills-py@xebcyp-plugins": false,
     "bsl-language-server@xebcyp-plugins": true,
     "data-skills@xebcyp-plugins": true,
     "frontend-design@claude-plugins-official": true,

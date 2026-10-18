@@ -1,7 +1,7 @@
 {
   "name": "onec-odata",
-  "description": "Данные живой базы 1С 8.x через штатный OData 3.0 (MCP-сервер @theyahia/aprovodka 4.3.0). Запись в базу — только после явного подтверждения (ONEC_WRITE_MODE=approval).",
-  "version": "1.0.0",
+  "description": "Данные живой базы 1С 8.x через штатный OData 3.0 (MCP-сервер @theyahia/aprovodka 4.3.0, зависимости закреплены lock-файлом). Запись в базу — только после явного подтверждения (ONEC_WRITE_MODE=approval).",
+  "version": "1.1.0",
   "author": {
     "name": "XEBCYP"
   },

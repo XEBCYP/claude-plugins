@@ -2,17 +2,20 @@
 
 ## How tool references work
 
-Plugin files use `~~category` as a placeholder for whatever tool the user connects in that category. For example, `~~data warehouse` might mean Snowflake, BigQuery, or any other warehouse with an MCP server.
+Skill files use `~~category` as a placeholder for whatever tool is connected in that category. In this
+marketplace the plugin ships **without** its own `.mcp.json` (the original Snowflake/BigQuery/Hex/Amplitude/Jira
+connectors were removed, see AUDIT.md) — the data comes from the database plugins of the same marketplace or from
+any MCP server you connect yourself.
 
-Plugins are **tool-agnostic** — they describe workflows in terms of categories (data warehouse, notebook, product analytics, etc.) rather than specific products. The `.mcp.json` pre-configures specific MCP servers, but any MCP server in that category works.
+## Connectors in xebcyp-plugins
 
-## Connectors for this plugin
+| Category | Placeholder | Use | What it gives |
+|----------|-------------|-----|---------------|
+| Data warehouse (SQL) | `~~data warehouse` | `dbhub@xebcyp-plugins` | Read-only SQL: PostgreSQL, MySQL, MariaDB, MS SQL, Oracle, SQLite (up to 1000 rows) |
+| 1C:Enterprise 8.x data | `~~data warehouse` | `onec-odata@xebcyp-plugins` | Catalogs, documents, registers, entries of a live 1C base over standard OData |
 
-| Category | Placeholder | Included servers | Other options |
-|----------|-------------|-----------------|---------------|
-| Data warehouse | `~~data warehouse` | Snowflake\*, Databricks\*, BigQuery, Definite | Redshift, PostgreSQL, MySQL |
-| Notebook | `~~notebook` | Hex | Jupyter, Deepnote, Observable |
-| Product analytics | `~~product analytics` | Amplitude | Mixpanel, Heap |
-| Project tracker | `~~project tracker` | Atlassian (Jira/Confluence) | Linear, Asana |
+Both are disabled until a connection is set: enable them in `/plugin` and Claude Code asks for the DSN or the
+OData address, user and password.
 
-\* Placeholder — MCP URL not yet configured
+Not connected here: `~~notebook`, `~~product analytics`, `~~project tracker`. Without a connector, paste query
+results or attach CSV/Excel files — the skills work with them too.

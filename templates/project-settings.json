@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$(uname -s)\" = Linux ] || exit 0; python3 -c 'import lxml, PIL, psutil' 2>/dev/null || python3 -m pip install --user -q 'lxml>=4.9.0' 'Pillow>=10.0.0' 'psutil>=5.9.0' >/dev/null 2>&1 || true",
+            "command": "[ \"$(uname -s)\" = Linux ] || exit 0; python3 -c 'import lxml, PIL, psutil' 2>/dev/null && exit 0; P='lxml>=4.9.0 Pillow>=10.0.0 psutil>=5.9.0'; python3 -m pip install --user -q $P >/dev/null 2>&1 || python3 -m pip install --user -q --break-system-packages $P >/dev/null 2>&1 || python3 -m pip install -q $P >/dev/null 2>&1 || { echo 'xebcyp-plugins: не удалось поставить lxml, Pillow, psutil (pip) — навыки 1c-skills-py работать не будут' >&2; exit 1; }",
             "timeout": 180
           }
         ]

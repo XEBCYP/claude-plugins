@@ -1,13 +1,14 @@
 {
   "mcpServers": {
     "aprovodka": {
-      "command": "npx",
-      "args": ["-y", "@theyahia/aprovodka@4.3.0"],
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/start.mjs"],
       "env": {
         "ONEC_BASE_URL": "${user_config.base_url}",
         "ONEC_LOGIN": "${user_config.login}",
         "ONEC_PASSWORD": "${user_config.password}",
-        "ONEC_WRITE_MODE": "approval"
+        "ONEC_WRITE_MODE": "approval",
+        "ONEC_ODATA_DATA_DIR": "${CLAUDE_PLUGIN_DATA}"
       }
     }
   }

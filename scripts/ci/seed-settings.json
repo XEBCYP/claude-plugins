@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": ["Bash(npm test && echo <ok>)"],
+    "deny": []
+  },
+  "env": {
+    "GREETING": "Привет \"q\" & 'x'"
+  },
+  "cleanupPeriodDays": 30,
+  "extraKnownMarketplaces": {
+    "xebcyp-plugins": {
+      "source": { "source": "github", "repo": "XEBCYP/claude-plugins" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "data-skills@xebcyp-plugins": false
+  }
+}
