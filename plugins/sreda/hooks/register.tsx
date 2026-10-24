@@ -1,16 +1,24 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Pending } from '../types'
+import type { Option, Pending } from '../types'
 
-// Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json (пишут Claude и
-// глобальная сессия за подпроекты), с кнопками. Вопрос виден, пока на него не ответили: кнопкой здесь или в чате.
-// Отвеченный вопрос переезжает в zhdut-otveta-arhiv.json — рабочий файл каждая сессия читает целиком, и с
-// отвеченными он рос до ~15 тыс. токенов на чтение.
+// Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json, с кнопками. Вопрос
+// окна AskUserQuestion попадает в панель сам; ответ в окне сразу уносит его в архив, кнопка панели сразу отвечает
+// на открытое окно — своей сессии или чужой (та узнаёт из файла при опросе). Отвеченный вопрос — в
+// zhdut-otveta-arhiv.json: рабочий файл каждая сессия читает целиком, с отвеченными он рос до ~15 тыс. токенов.
 const PANE = 'zhdut-otveta'
 const NAME = 'zhdut-otveta.json'
 const ARCHIVE = 'zhdut-otveta-arhiv.json'
+// Опрос файла: так быстро кнопка другой сессии доходит до окна этой
+const POLL_MS = 1500
 const items = atom({ plugin: 'sreda', key: 'items' } as const, [] as Pending[])
+
+// Открытые окна этой сессии: id вопроса → ответить окну. Переменные модуля живут до перезагрузки плагина.
+const waiting = new Map<string, (label: string) => void>()
+// Открытые вопросы этой сессии при прошлом опросе — чтобы заметить, что их ответили в другой сессии
+let mineOpen = new Set<string>()
+let me = ''
 
 // Файлы общие для всех сессий этого компьютера — в папке пользователя.
 async function file($: any, name = NAME): Promise<string> {
@@ -27,27 +35,105 @@ async function load($: any, name = NAME): Promise<Pending[]> {
   }
 }
 
+async function save($: any, list: Pending[], name = NAME): Promise<void> {
+  await $.fs.write(await file($, name), JSON.stringify({ items: list }, null, 2))
+}
+
+async function self($: any): Promise<string> {
+  if (!me) me = await $.session.id()
+  return me
+}
+
+// Убрать вопрос из рабочего файла в архив с ответом; false — его там уже нет (ответили в другом месте).
+async function archive($: any, id: string, label: string): Promise<boolean> {
+  const list = await load($)
+  const it = list.find(one => one.id === id)
+  if (!it) return false
+  const done: Pending = {
+    ...it,
+    status: 'answered',
+    answer: label,
+    answeredAt: new Date().toISOString(),
+    answeredIn: await self($),
+  }
+  await save($, [...(await load($, ARCHIVE)), done], ARCHIVE)
+  const rest = list.filter(one => one.id !== id)
+  await save($, rest)
+  await update($, items, () => rest)
+  return true
+}
+
 async function refresh($: any): Promise<void> {
   const list = await load($)
   await update($, items, () => list)
+  const mine = await self($)
+  const now = new Set(list.filter(one => one.session === mine).map(one => one.id))
+  const gone = [...mineOpen].filter(id => !now.has(id))
+  mineOpen = now
+  if (gone.length === 0) return
+  // Наш вопрос ушёл из файла: ответили кнопкой в другой сессии — ответить окну или прислать ответ сообщением
+  const done = await load($, ARCHIVE)
+  for (const id of gone) {
+    const it = done.find(one => one.id === id)
+    if (!it?.answer || it.answeredIn === mine) continue
+    const reply = waiting.get(id)
+    if (reply) reply(it.answer)
+    else if (it.answeredIn) {
+      void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${it.answer}`, asUser: true })
+    }
+  }
 }
 
-async function answer($: any, it: Pending, label: string): Promise<void> {
-  const list = await load($)
-  const done = { ...it, status: 'answered' as const, answer: label, answeredAt: new Date().toISOString() }
-  const rest = list.filter(one => one.id !== it.id)
-  const archive = await load($, ARCHIVE)
-  await $.fs.write(await file($, ARCHIVE), JSON.stringify({ items: [...archive, done] }, null, 2))
-  await $.fs.write(await file($), JSON.stringify({ items: rest }, null, 2))
-  await update($, items, () => rest)
+async function press($: any, it: Pending, label: string): Promise<void> {
+  if (!(await archive($, it.id, label))) return
+  const reply = waiting.get(it.id)
+  if (reply) return reply(label)
+  // Окно в другой сессии — она ответит ему сама при опросе файла
+  if (it.session && it.session !== (await self($))) return
   void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${label}`, asUser: true })
+}
+
+type Question = { question: string; header?: string; options?: { label: string; description?: string }[] }
+
+// Вопросы окна — в панель. Тот же открытый вопрос, записанный раньше вручную, не дублируется, а становится нашим.
+async function enlist($: any, questions: Question[], callId: string): Promise<string[]> {
+  const mine = await self($)
+  const cwd = String(await $.session.cwd()).split('\\').join('/')
+  const project = cwd.split('/').filter(Boolean).pop() || cwd
+  const list = await load($)
+  const ids = questions.map((q, k) => {
+    const same = list.find(one => one.question === q.question)
+    if (same) {
+      same.session = mine
+      return same.id
+    }
+    const options: Option[] = (q.options ?? []).map(o => ({
+      label: o.label,
+      ...(o.description ? { desc: o.description } : {}),
+    }))
+    const id = `${callId}-${k}`
+    list.push({
+      id,
+      from: q.header ? `${project} · ${q.header}` : project,
+      question: q.question,
+      options,
+      status: 'open',
+      asked: new Date().toISOString().slice(0, 10),
+      session: mine,
+    })
+    return id
+  })
+  await save($, list)
+  await update($, items, () => list)
+  ids.forEach(id => mineOpen.add(id))
+  return ids
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'zhdut-otveta', description: 'Открыть панель «Ждут ответа»' })
     await refresh($)
-    $.clock.every(5000, () => refresh($))
+    $.clock.every(POLL_MS, () => void refresh($))
     void $.ui.open({ id: PANE, title: 'Ждут ответа' })
     return next(e)
   })
@@ -56,6 +142,44 @@ export const register: Register = on => {
     await refresh($)
     await $.ui.open({ id: PANE, title: 'Ждут ответа' })
     return { text: 'Панель «Ждут ответа» открыта.' }
+  })
+
+  // Окно вопроса Claude: ждём, кто ответит первым — окно или кнопка панели. Вопросы других плагинов не трогаем.
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    if (next.origin.plugin !== 'engine') return next(e)
+    const questions = e.questions as Question[]
+    const ids = await enlist($, questions, e.tool_use_id)
+
+    const answers: Record<string, string> = {}
+    const fromPane = new Promise<Record<string, string>>(resolve => {
+      ids.forEach((id, k) =>
+        waiting.set(id, label => {
+          waiting.delete(id)
+          answers[questions[k].question] = label
+          if (Object.keys(answers).length === questions.length) resolve(answers)
+        }),
+      )
+    })
+
+    try {
+      const dialog = next(e).then(r => ({ dialog: r }))
+      // Окно закрыто ответом из панели — его поздний отказ уже никому не нужен
+      dialog.catch(() => {})
+      const won = await Promise.race([dialog, fromPane.then(a => ({ pane: a }))])
+      if ('pane' in won) return { result: { questions: e.questions, answers: won.pane } } as never
+
+      const r = won.dialog
+      const got = r.deny === undefined && !r.isError
+        ? ((r.result as { answers?: Record<string, string> })?.answers ?? {})
+        : {}
+      for (const [k, id] of ids.entries()) {
+        const label = got[questions[k].question]
+        if (label) await archive($, id, label)
+      }
+      return r
+    } finally {
+      ids.forEach(id => waiting.delete(id))
+    }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -72,13 +196,17 @@ export const register: Register = on => {
             {it.why ? <Text>{it.why}</Text> : null}
             {it.options.map((opt, k) => (
               <Box key={`${it.id}-${k}`} flexDirection="column">
-                <Button variant={k === 0 ? 'primary' : 'secondary'} onPress={() => void answer($, it, opt.label)}>
+                <Button
+                  key={`${it.id}:${k}`}
+                  variant={k === 0 ? 'primary' : 'secondary'}
+                  onPress={() => void press($, it, opt.label)}
+                >
                   {opt.label}
                 </Button>
                 {opt.desc ? <Text dimColor>{opt.desc}</Text> : null}
               </Box>
             ))}
-            <Text dimColor>Или ответьте в чате — вопрос уйдёт отсюда, когда Claude отметит ответ.</Text>
+            <Text dimColor>Или ответьте в окне вопроса в чате — отсюда вопрос уйдёт сам.</Text>
           </Box>
         ))}
       </Box>
