@@ -17,6 +17,7 @@
 | `data-skills` | копия `data/` из [anthropics/knowledge-work-plugins](https://github.com/anthropics/knowledge-work-plugins) `33eeda1` (Apache-2.0) | Чисто; внешние коннекторы удалены |
 | `ui-icons` | свой плагин; скрипт `icons.py` скачивает `lucide-static@1.49.0` и `@tabler/icons@3.48.0` с registry.npmjs.org | Чисто; архив проверяется по sha512 из реестра, распаковывается только в память |
 | `delivery-control` | свой плагин; идеи из [nick-vels/skills](https://github.com/nick-vels/skills) `9fc898c` (Autopilot), [obra/superpowers](https://github.com/obra/superpowers) `bb92a77` и [mattpocock/skills](https://github.com/mattpocock/skills) `49dd158` (все MIT), текст переписан | Только markdown, кода и хуков нет |
+| `autohandoff` | свой плагин (мод с функциональными хуками); идея — мод `handoff` (nickvels-mods 1.1.0), код написан заново | Сеть не использует; пишет только свою отметку в хранилище мода; читает время изменения файла передачи; отправляет сообщения и `/clear` в своей же сессии |
 | `frontend-design` | официальный маркетплейс Anthropic `claude-plugins-official` | Один SKILL.md без кода |
 
 ## Подробности
