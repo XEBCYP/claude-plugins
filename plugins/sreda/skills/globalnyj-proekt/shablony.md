@@ -66,7 +66,8 @@
 ```markdown
 ## <N>. <Подпроект> — <что делает> (<новый | есть>, <дата>)
 
-- **Где:** `<путь>`, ветка `<ветка>`; <удалённый репозиторий, если есть>.
+- **Где:** `<путь>`, ветка `<ветка>`; GitHub `<владелец>/<имя>` (закрытый) или «нет».
+- **Отправлено:** <дата>, `<ветка>` = `<коммит>`.
 - **Отдаёт глобальному:** <что и в каком виде>.
 - **Задание:** `<путь к заданию>`.
 - **Состояние:** <запущен | в работе | сдан | ждёт пользователя: что именно>.
@@ -122,6 +123,22 @@ verified, what you need from the user.
 ```text
 Question for the user (<Subproject>): <what to decide, one sentence>. Options: A — <…> (recommended: <why>); B — <…>.
 Blocked until answered: <yes/no, what waits>.
+```
+
+Команда пользователя «закоммитить и отправить» (раздел 7):
+
+```text
+The user told the global project to commit and push everything (<date>): «<русская цитата>». Reach a safe point
+(do not stop mid-change), commit your finished work, push your working branch (no --force, no PR merge). Report in 2–4
+lines: branch, commit, pushed yes/no, what stays uncommitted and why.
+```
+
+Тому же — занятому подпроекту (идёт долгая операция):
+
+```text
+The user told the global project to commit and push everything (<date>): «<русская цитата>». Do not interrupt your
+current operation. When it finishes and you are at a safe point, commit your finished work, push your working branch
+(no --force, no PR merge) and report in 2–4 lines: branch, commit, pushed yes/no, what stays uncommitted and why.
 ```
 
 Ответ глобальной подпроекту:
