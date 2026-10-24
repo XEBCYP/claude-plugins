@@ -1,0 +1,13 @@
+{
+  "name": "sreda",
+  "displayName": "Среда работы",
+  "description": "Способ работы с пользователем в одном месте: правила (разобраться до конца, решить и показать с обоснованием, не применять без «да», вопросы окном и в панель, слова дословно), глобальный проект с подпроектами и сессиями, панель «Ждут ответа». Вместе с delivery-control и autohandoff.",
+  "version": "1.0.0",
+  "author": {
+    "name": "XEBCYP"
+  },
+  "license": "MIT",
+  "keywords": ["workflow", "rules", "questions", "decisions", "subprojects", "sessions", "pane"],
+  "dependencies": ["delivery-control", "autohandoff"],
+  "types": "./types/index.d.ts"
+}

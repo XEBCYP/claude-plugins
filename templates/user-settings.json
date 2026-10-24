@@ -23,7 +23,7 @@
     "ui-icons@xebcyp-plugins": true,
     "delivery-control@xebcyp-plugins": true,
     "autohandoff@xebcyp-plugins": true,
-    "zhdut-otveta@xebcyp-plugins": true,
+    "sreda@xebcyp-plugins": true,
     "dbhub@xebcyp-plugins": false,
     "onec-odata@xebcyp-plugins": false
   }

@@ -79,10 +79,10 @@
       "source": "./plugins/autohandoff"
     },
     {
-      "name": "zhdut-otveta",
-      "description": "Панель «Ждут ответа»: вопросы пользователю с пояснениями и кнопками, видна рядом с чатом, пока он не ответит.",
+      "name": "sreda",
+      "description": "Среда работы: правила работы с пользователем, глобальный проект с подпроектами и сессиями, панель «Ждут ответа»; включает delivery-control и autohandoff.",
       "category": "workflow",
-      "source": "./plugins/zhdut-otveta"
+      "source": "./plugins/sreda"
     }
   ]
 }

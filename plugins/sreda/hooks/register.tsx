@@ -3,11 +3,12 @@ import type { Register } from 'claude-code'
 
 import type { Pending } from '../types'
 
-// Панель «Ждут ответа»: вопросы пользователю из ~/.claude/zhdut-otveta.json (пишут Claude и сессии подпроектов),
-// с кнопками. Вопрос виден, пока на него не ответили: кнопкой здесь или в чате (тогда Claude ставит status "answered").
+// Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json (пишут Claude и
+// глобальная сессия за подпроекты), с кнопками. Вопрос виден, пока на него не ответили: кнопкой здесь или в чате
+// (тогда Claude ставит status "answered").
 const PANE = 'zhdut-otveta'
 const NAME = 'zhdut-otveta.json'
-const items = atom({ plugin: 'zhdut-otveta', key: 'items' } as const, [] as Pending[])
+const items = atom({ plugin: 'sreda', key: 'items' } as const, [] as Pending[])
 
 // Файл общий для всех сессий этого компьютера — в папке пользователя.
 async function file($: any): Promise<string> {

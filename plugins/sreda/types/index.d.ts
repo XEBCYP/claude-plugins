@@ -13,6 +13,6 @@ export type Pending = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'zhdut-otveta': { items: Pending[] }
+    sreda: { items: Pending[] }
   }
 }
