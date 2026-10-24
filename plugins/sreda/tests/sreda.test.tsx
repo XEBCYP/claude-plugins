@@ -232,3 +232,23 @@ test('ответ текстом — инструмент «отвечено» п
   expect(list(env, MAIN).map(one => one.id)).toEqual(['q2'])
   expect(list(env, ARCHIVE)[0].answer).toBe('да, слить')
 })
+
+test('свой ответ в панели — уходит в открытое окно, как «Other»', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = ask($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  const ui = await $.ui.mount(PANE)
+  await $.ui.input({ plugin: 'sreda', key: `${it.id}:own`, text: '   ' })
+  expect(list(env, MAIN).length).toBe(1)
+  await $.ui.input({ plugin: 'sreda', key: `${it.id}:own`, text: ' Слить после обеда ' })
+  const r = await pending
+
+  expect(r.result.answers[Q]).toBe('Слить после обеда')
+  expect(list(env, ARCHIVE)[0].answer).toBe('Слить после обеда')
+  expect(env.submits).toEqual([])
+  await ui.unmount()
+})

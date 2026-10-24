@@ -240,7 +240,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
     const open = (await read($, items)).filter(one => one.status !== 'answered')
 
     return (
@@ -263,6 +263,15 @@ export const register: Register = on => {
                 {opt.desc ? <Text dimColor>{opt.desc}</Text> : null}
               </Box>
             ))}
+            {/* Свой ответ, как «Other» в окне: уходит туда же, куда и кнопка */}
+            <Input
+              key={`${it.id}:own`}
+              placeholder="Свой ответ…"
+              submitLabel="ответить"
+              onSubmit={value => {
+                if (value.trim()) void press($, it, value.trim())
+              }}
+            />
             <Text dimColor>Или ответьте в окне вопроса в чате — отсюда вопрос уйдёт сам.</Text>
           </Box>
         ))}
