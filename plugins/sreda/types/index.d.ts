@@ -9,6 +9,10 @@ export type Pending = {
   answer?: string
   asked?: string
   answeredAt?: string
+  // Сессия, в которой открыто окно вопроса (вопрос записал сам плагин)
+  session?: string
+  // Сессия, в которой ответили
+  answeredIn?: string
 }
 
 declare module 'claude-code' {
