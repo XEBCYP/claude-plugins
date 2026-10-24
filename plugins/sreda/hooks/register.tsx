@@ -93,10 +93,39 @@ async function press($: any, it: Pending, label: string): Promise<void> {
   void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${label}`, asUser: true })
 }
 
+// Claude сам файл панели не пишет: вопрос, записанный вручную, а потом заданный окном чуть другими словами, вставал в
+// панель дважды. Сессии со старыми правилами (CLAUDE.md проекта, навык до 1.2.0) так и делали. Чтение не трогаем.
+const WRITES = /Set-Content|Add-Content|Out-File|WriteAll|\.Write\(|Copy-Item|Move-Item|Remove-Item|New-Item|Delete\(|\btee\b|sed\s+-i|\b(cp|mv|rm)\s/i
+const REDIRECT = /[^-2]>>?\s*['"]?[^\s'"]*zhdut-otveta/i
+let answeredTool = 'mcp__sreda__otvecheno'
+
+function writesPane(tool: string, e: any): boolean {
+  if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit') return /zhdut-otveta/i.test(String(e.file_path ?? ''))
+  if (tool === 'Bash' || tool === 'PowerShell') {
+    const cmd = String(e.command ?? '')
+    return /zhdut-otveta/i.test(cmd) && (WRITES.test(cmd) || REDIRECT.test(cmd))
+  }
+  return false
+}
+
+// Пользователь ответил текстом, не нажав кнопку: найти открытый вопрос по тексту (целиком или частью) и в архив.
+async function answered($: any, question: string, answer: string): Promise<string> {
+  const list = await load($)
+  const exact = list.filter(one => one.question === question)
+  const found = exact.length > 0 ? exact : list.filter(one => one.question.includes(question))
+  if (found.length !== 1) {
+    const open = list.map(one => `- ${one.question}`).join('\n') || '(пусто)'
+    return `${found.length === 0 ? 'Такого вопроса в панели нет' : 'Подходит несколько вопросов — укажите точнее'}. Открытые:\n${open}`
+  }
+  await archive($, found[0].id, answer)
+  return `Вопрос «${found[0].question}» перенесён в архив с ответом «${answer}».`
+}
+
 type Question = { question: string; header?: string; options?: { label: string; description?: string }[] }
 
 // Вопросы окна — в панель. Тот же открытый вопрос, записанный раньше вручную, не дублируется, а становится нашим.
-async function enlist($: any, questions: Question[], callId: string): Promise<string[]> {
+// hold(ids) — до записи в файл: кнопка панели не должна застать вопрос, окно которого ещё не ждёт ответа.
+async function enlist($: any, questions: Question[], callId: string, hold: (ids: string[]) => void): Promise<string[]> {
   const mine = await self($)
   const cwd = String(await $.session.cwd()).split('\\').join('/')
   const project = cwd.split('/').filter(Boolean).pop() || cwd
@@ -123,6 +152,7 @@ async function enlist($: any, questions: Question[], callId: string): Promise<st
     })
     return id
   })
+  hold(ids)
   await save($, list)
   await update($, items, () => list)
   ids.forEach(id => mineOpen.add(id))
@@ -132,6 +162,20 @@ async function enlist($: any, questions: Question[], callId: string): Promise<st
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'zhdut-otveta', description: 'Открыть панель «Ждут ответа»' })
+    const reg = await $.tool.register({
+      name: 'otvecheno',
+      description:
+        'Панель «Ждут ответа»: пользователь ответил на вопрос текстом в чате, не нажав кнопку окна, — перенести вопрос ' +
+        'из панели в архив с этим ответом. question — текст вопроса окна (целиком или узнаваемая часть), answer — ответ ' +
+        'пользователя коротко. Файлы панели вручную не писать.',
+      inputSchema: {
+        type: 'object',
+        properties: { question: { type: 'string' }, answer: { type: 'string' } },
+        required: ['question', 'answer'],
+      },
+      isDeferred: true,
+    })
+    answeredTool = reg.tool
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
     void $.ui.open({ id: PANE, title: 'Ждут ответа' })
@@ -144,22 +188,35 @@ export const register: Register = on => {
     return { text: 'Панель «Ждут ответа» открыта.' }
   })
 
+  // Имя инструмента движок даёт при регистрации — сверяем с ним, а не с догадкой
+  on('tool.call', async ($, e: any, next) => {
+    if (e.tool === answeredTool) {
+      return { result: await answered($, String(e.question ?? ''), String(e.answer ?? '')) } as never
+    }
+    if (next.origin.plugin !== 'engine' || !writesPane(e.tool, e)) return next(e)
+    return {
+      deny:
+        'Файл панели «Ждут ответа» пишет сам плагин sreda: задайте вопрос окном AskUserQuestion — в панель он попадёт ' +
+        `сам, без дубля. Пользователь ответил текстом, не нажав кнопку, — инструмент ${answeredTool}.`,
+    }
+  })
+
   // Окно вопроса Claude: ждём, кто ответит первым — окно или кнопка панели. Вопросы других плагинов не трогаем.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (next.origin.plugin !== 'engine') return next(e)
     const questions = e.questions as Question[]
-    const ids = await enlist($, questions, e.tool_use_id)
-
     const answers: Record<string, string> = {}
-    const fromPane = new Promise<Record<string, string>>(resolve => {
-      ids.forEach((id, k) =>
+    let done = (_: Record<string, string>) => {}
+    const fromPane = new Promise<Record<string, string>>(resolve => (done = resolve))
+    const ids = await enlist($, questions, e.tool_use_id, held =>
+      held.forEach((id, k) =>
         waiting.set(id, label => {
           waiting.delete(id)
           answers[questions[k].question] = label
-          if (Object.keys(answers).length === questions.length) resolve(answers)
+          if (Object.keys(answers).length === questions.length) done(answers)
         }),
-      )
-    })
+      ),
+    )
 
     try {
       const dialog = next(e).then(r => ({ dialog: r }))
