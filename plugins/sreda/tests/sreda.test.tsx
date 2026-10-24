@@ -26,6 +26,8 @@ type Env = {
   submits: string[]
   // Ответ окна; null — окно висит, пока на него не ответят из панели
   dialog: string | null
+  // Окно ещё не нарисовано, пока тест не отпустит
+  gate?: Promise<void>
 }
 
 function engine(on: any, env: Env) {
@@ -33,6 +35,7 @@ function engine(on: any, env: Env) {
   mock.store(on)
   mock.env(on, { USERPROFILE: 'C:\\Users\\tester' })
   on('command.register', () => ({ value: { command: 'zhdut-otveta' } }))
+  on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__sreda__${e.name}` } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -51,6 +54,8 @@ function engine(on: any, env: Env) {
     return { text: e.text }
   })
   on('tool.call', async (_: unknown, e: any) => {
+    if (e.tool !== 'AskUserQuestion') return { result: 'ran' }
+    if (env.gate) await env.gate
     if (env.dialog === null) await new Promise(() => {})
     return { result: { questions: e.questions, answers: { [e.questions[0].question]: env.dialog } } }
   })
@@ -165,3 +170,65 @@ test('вопрос, записанный вручную, — ответ кноп
   await ui.unmount()
 })
 
+
+test('кнопка нажата до того, как окно нарисовано, — ответ уходит результатом, без сообщения', async ($, on) => {
+  let open = () => {}
+  const env: Env = { files: {}, submits: [], dialog: null, gate: new Promise<void>(r => (open = r)) }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = ask($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:0` })
+  const r = await pending
+  open()
+
+  expect(r.result.answers[Q]).toBe('Да')
+  expect(list(env, MAIN)).toEqual([])
+  expect(env.submits).toEqual([])
+  await ui.unmount()
+})
+
+async function outcome(p: Promise<any>): Promise<any> {
+  try {
+    return await p
+  } catch (err) {
+    return { deny: String(err) }
+  }
+}
+
+test('Claude не пишет файл панели сам — запись отклонена, чтение проходит', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Да' }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const ps = await outcome($.tool.call({ tool: 'PowerShell', command: `$j | ConvertTo-Json | Set-Content ${MAIN}` } as any))
+  expect(String(ps.deny)).toContain('AskUserQuestion')
+  const write = await outcome($.tool.call({ tool: 'Write', file_path: MAIN, content: '{}' } as any))
+  expect(String(write.deny)).toContain('mcp__sreda__otvecheno')
+  const bash = await outcome($.tool.call({ tool: 'Bash', command: `echo x >> ${ARCHIVE}` } as any))
+  expect(bash.deny).toBeDefined()
+
+  const read = await outcome($.tool.call({ tool: 'PowerShell', command: `Get-Content ${MAIN} 2>$null` } as any))
+  expect(read.deny).toBeUndefined()
+})
+
+test('ответ текстом — инструмент «отвечено» переносит вопрос в архив', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  env.files[MAIN] = JSON.stringify({
+    items: [
+      { id: 'q1', from: 'Demo', question: Q, options: [{ label: 'Да' }], status: 'open' },
+      { id: 'q2', from: 'Demo', question: 'Другой вопрос?', options: [{ label: 'Да' }], status: 'open' },
+    ],
+  })
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const r: any = await $.tool.call({ tool: 'mcp__sreda__otvecheno', question: 'Слить', answer: 'да, слить' } as any)
+
+  expect(String(r.result)).toContain('перенесён')
+  expect(list(env, MAIN).map(one => one.id)).toEqual(['q2'])
+  expect(list(env, ARCHIVE)[0].answer).toBe('да, слить')
+})
