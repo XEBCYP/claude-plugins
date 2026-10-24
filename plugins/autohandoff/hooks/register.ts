@@ -2,7 +2,9 @@ import type { Hook, Register } from 'claude-code'
 
 // Автопередача работы в чистый контекст (замена моду handoff).
 //
-// Окно поиска момента — от `from` до `to` процентов контекста (по умолчанию 30–50). Передача делается, когда
+// Окно поиска момента — от `from` до `to` тысяч токенов контекста (по умолчанию 150–250; в глобальной сессии
+// sreda — `globalFrom`–`globalTo`, 120–180). Пороги в токенах, а не в процентах окна: цена каждого действия растёт
+// с числом токенов в контексте, а процент при окне в 1 млн означает в 5 раз больше, чем при 200 тыс. Передача делается, когда
 // пользователь отправляет следующее сообщение после законченной задачи: прошлый ход закончился без прерывания,
 // итоговое окно приложения (wrap_up) не задало вопроса, фоновых агентов нет, и проверка по самому разговору
 // ($.model.fork — без инструментов, по кэшу) ответила «ДА, можно передать без потерь». Тогда мод придерживает
@@ -10,7 +12,8 @@ import type { Hook, Register } from 'claude-code'
 // документ», а следом — придержанное сообщение пользователя. Ответ прошлой задачи пропадает с экрана только после
 // того, как пользователь его прочитал и написал новое.
 //
-// С `to` процентов — вопрос кнопкой «Передать?», как у handoff, даже посреди задачи; «Не сейчас» — снова через +10 %.
+// С `to` — вопрос кнопкой «Передать?», как у handoff, даже посреди задачи; «Не сейчас» — снова через +`askStep`
+// (50 тыс., в глобальной — `globalAskStep`, 30 тыс.).
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
@@ -22,7 +25,7 @@ type Pending = {
   writeTurnId: string | null
   // Сообщения пользователя, которые уйдут в чистую сессию после документа
   held: string[]
-  // Контекст в начале передачи: от него считается, когда снова включаться в чистой сессии
+  // Контекст в начале передачи, тыс. токенов: от него считается, когда снова включаться в чистой сессии
   ctx: number
 }
 
@@ -34,13 +37,15 @@ type LastTurn = {
 
 // Что мод помнит о диалоге в $.store — переживает сон диалога и перезапуск процесса
 type Mark = {
+  // Единица порогов в отметке; отметка без неё — из версии с процентами, её не берём
+  unit: 'k'
   pending: Pending | null
   askAt: number
   isArmed: boolean
-  // Ниже какого процента контекста мод снова включается после передачи
+  // Ниже скольких тысяч токенов контекста мод снова включается после передачи
   armBelow: number
   isOff: boolean
-  // Процент, на котором проверка момента ответила «нет»: следующая — не раньше +RECHECK_STEP
+  // Контекст (тыс. токенов), на котором проверка момента ответила «нет»: следующая — не раньше +RECHECK_STEP
   checkedAt: number
   lastTurn: LastTurn | null
   at: number
@@ -49,10 +54,13 @@ type Mark = {
 const WAIT_MS = 15 * 60_000
 const FORK_MS = 30_000
 const MARK_TTL = 30 * 24 * 60 * 60_000
-const RECHECK_STEP = 5
+// Тыс. токенов
+const RECHECK_STEP = 20
 // Чистая сессия, которая началась выше `from` (большой CLAUDE.md, длинный документ), включается снова,
-// когда контекст опустится на столько ниже, чем был при передаче
-const REARM_DROP = 15
+// когда контекст опустится на столько тысяч токенов ниже, чем был при передаче
+const REARM_DROP = 50
+// Глобальная сессия sreda — та, в папке которой лежит реестр подпроектов
+const GLOBAL_MARKER = 'docs/Подпроекты.md'
 const HOUR = 60 * 60_000
 const K_SESSION = 's:'
 const K_TIMES = 'times'
@@ -62,7 +70,7 @@ const USER_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
 const MENTION = /(^|\s)@[^\s@]/
 
 const CHECK_PROMPT = `Служебный вопрос мода автопередачи — это не задача, ничего не делай, только ответь.
-Контекст сессии заполнен на {ctx}%. Пользователь только что написал новое сообщение (ниже, между <<< и >>>).
+Контекст сессии — {ctx} тыс. токенов. Пользователь только что написал новое сообщение (ниже, между <<< и >>>).
 Можно ли сейчас БЕЗ ПОТЕРЬ передать работу новой чистой сессии, которая получит только документ передачи
 (требования, решения и их согласование, что сделано и что не проверено, изменённые файлы, открытые вопросы,
 список задач) и это сообщение?
@@ -76,9 +84,14 @@ const CHECK_PROMPT = `Служебный вопрос мода автопере�
 {text}
 >>>`
 
-// Пороги из настроек мода; задаются в register
-let from = 30
-let to = 50
+// Пороги из настроек мода, тыс. токенов; задаются в register, для глобальной сессии — в session.start
+type Limits = { from: number; to: number; askStep: number }
+let usual: Limits = { from: 150, to: 250, askStep: 50 }
+let global: Limits = { from: 120, to: 180, askStep: 30 }
+let from = usual.from
+let to = usual.to
+let askStep = usual.askStep
+let isGlobal = false
 let perHour = 2
 
 // Приложение усыпляет простаивающие диалоги и будит их новым процессом: переменные модуля пропадают,
@@ -94,7 +107,7 @@ let turnWrap: LastTurn['wrap'] = 'none'
 let lastOrigin = ''
 
 function freshMark(): Mark {
-  return { pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, lastTurn: null, at: 0 }
+  return { unit: 'k', pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, lastTurn: null, at: 0 }
 }
 
 function num(value: unknown, fallback: number): number {
@@ -127,9 +140,22 @@ async function noteTime($: Dollar): Promise<void> {
   await $.store.set(K_TIMES, [...times, await $.clock.now()])
 }
 
-async function contextPercent($: Dollar): Promise<number> {
+// Контекст в тысячах токенов
+async function contextK($: Dollar): Promise<number> {
   const { context } = await $.session.usage()
-  return context.percent ?? 0
+  return (context.tokens ?? 0) / 1000
+}
+
+function limits(raw: Record<string, unknown>, prefix: string, fallback: Limits): Limits {
+  const key = (name: string) => (prefix ? prefix + name[0].toUpperCase() + name.slice(1) : name)
+  const f = num(raw[key('from')], fallback.from)
+  return { from: f, to: Math.max(num(raw[key('to')], fallback.to), f), askStep: num(raw[key('askStep')], fallback.askStep) }
+}
+
+async function chooseLimits($: Dollar, cwd: string): Promise<void> {
+  const marker = `${cwd.replace(/\\/g, '/').replace(/\/$/, '')}/${GLOBAL_MARKER}`
+  isGlobal = !!cwd && (await $.fs.stat(marker).then(s => s.kind === 'file', () => false))
+  ;({ from, to, askStep } = isGlobal ? global : usual)
 }
 
 async function resubmit($: Dollar, texts: string[]): Promise<void> {
@@ -232,15 +258,15 @@ async function offerHandoff($: Dollar, ctx: number): Promise<void> {
   if ((await $.session.surfaces()).length === 0) return
   isAsking = true
   try {
-    const answer = await $.ui.ask(`Контекст ${Math.round(ctx)}%. Передать работу в чистый контекст?`, {
+    const answer = await $.ui.ask(`Контекст ${Math.round(ctx)} тыс. токенов. Передать работу в чистый контекст?`, {
       header: 'Контекст',
       options: ['Передать', 'Не сейчас'],
     })
     // Пока вопрос висел, передача могла пройти сама: тогда ответ уже ни к чему
     if (answer === 'Передать' && mark.isArmed && !mark.pending) await startHandoff($, [], ctx)
-    else if (answer !== 'Передать') mark = { ...mark, askAt: Math.round(ctx) + 10 }
+    else if (answer !== 'Передать') mark = { ...mark, askAt: Math.round(ctx) + askStep }
   } catch {
-    mark = { ...mark, askAt: Math.round(ctx) + 10 }
+    mark = { ...mark, askAt: Math.round(ctx) + askStep }
   } finally {
     isAsking = false
     await save($)
@@ -276,7 +302,7 @@ async function commandText($: Dollar, raw: string): Promise<string> {
   const arg = raw.trim().toLowerCase()
   if (arg === 'now') {
     if (mark.pending) return `Передача уже идёт: ${mark.pending.path}`
-    void startHandoff($, [], await contextPercent($))
+    void startHandoff($, [], await contextK($))
     return 'Claude пишет документ передачи; после — чистый контекст и продолжение'
   }
   if (arg === 'off' || arg === 'on') {
@@ -284,25 +310,26 @@ async function commandText($: Dollar, raw: string): Promise<string> {
     await save($)
     return arg === 'off' ? 'Автопередача в этой сессии выключена' : 'Автопередача в этой сессии включена'
   }
-  const ctx = Math.round(await contextPercent($))
+  const ctx = Math.round(await contextK($))
   const state = mark.isOff
     ? 'выключена (/autohandoff on)'
     : mark.pending
       ? `идёт передача: ${mark.pending.path}`
       : mark.isArmed
-        ? `ждёт момента: ${from}–${to} % — в конце задачи, с ${to} % — вопрос`
-        : `ждёт, пока контекст опустится ниже ${mark.armBelow} %`
+        ? `ждёт момента: ${from}–${to} тыс. токенов — в конце задачи, с ${to} тыс. — вопрос`
+        : `ждёт, пока контекст опустится ниже ${mark.armBelow} тыс. токенов`
   const times = (await recentTimes($)).length
   const origin = lastOrigin ? ` Последнее сообщение пользователя пришло как «${lastOrigin}».` : ''
   const wraps = { none: 'не было', clean: 'было, без вопроса', ask: 'было, с вопросом' }
   const last = mark.lastTurn
   const turn = last ? ` Прошлый ход: ${last.isAborted ? 'прерван' : 'закончен'}, итоговое окно — ${wraps[last.wrap]}.` : ''
-  return `Контекст ${ctx} %. Автопередача ${state}. Попыток за час: ${times} из ${perHour}.${origin}${turn}`
+  const kind = isGlobal ? ' Сессия глобального проекта — свои пороги.' : ''
+  return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times} из ${perHour}.${origin}${turn}`
 }
 
 // Удачный момент — начать передачу с этим сообщением и пришедшими во время проверки; иначе — null
 async function tryHandoff($: Dollar, text: string): Promise<string | null> {
-  const ctx = await contextPercent($)
+  const ctx = await contextK($)
   if (ctx < from) return null
   isChecking = true
   let isGood = false
@@ -321,8 +348,8 @@ async function tryHandoff($: Dollar, text: string): Promise<string | null> {
     return null
   }
   void startHandoff($, [text, ...extra], ctx)
-  $.ui.toast(`Контекст ${Math.round(ctx)}%: задача закончена — передаю работу в чистый контекст`)
-  return `Контекст ${Math.round(ctx)}%, задача закончена: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само. Выключить автопередачу для этой сессии — /autohandoff off.`
+  $.ui.toast(`Контекст ${Math.round(ctx)} тыс. токенов: задача закончена — передаю работу в чистый контекст`)
+  return `Контекст ${Math.round(ctx)} тыс. токенов, задача закончена: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само. Выключить автопередачу для этой сессии — /autohandoff off.`
 }
 
 async function holdDuringHandoff($: Dollar, text: string): Promise<string> {
@@ -337,7 +364,7 @@ async function holdDuringHandoff($: Dollar, text: string): Promise<string> {
 async function loadMark($: Dollar): Promise<void> {
   cliId = await $.session.id()
   const saved = (await $.store.get(K_SESSION + cliId)) as Mark | undefined
-  mark = saved ? { ...freshMark(), ...saved } : freshMark()
+  mark = saved && saved.unit === 'k' ? { ...freshMark(), ...saved } : freshMark()
   void pruneMarks($, await $.clock.now())
   // Процесс перезапустился посреди передачи: документ мог успеть записаться
   if (mark.pending) void $.clock.after(2_000, () => void checkPending($, null))
@@ -368,8 +395,9 @@ async function onMeasure($: Dollar, ctx: number): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
-  from = num(options.from, 30)
-  to = Math.max(num(options.to, 50), from)
+  usual = limits(options, '', { from: 150, to: 250, askStep: 50 })
+  global = limits(options, 'global', { from: 120, to: 180, askStep: 30 })
+  ;({ from, to, askStep } = usual)
   perHour = num(options.perHour, 2)
   mark = freshMark()
 
@@ -380,6 +408,7 @@ export const register: Register = (on, options) => {
         description: 'Автопередача в чистый контекст: now — передать сейчас, off/on — выключить/включить для этой сессии, status',
       })
     }
+    await chooseLimits($, e.cwd ?? '')
     await loadMark($)
     return next(e)
   })
@@ -431,7 +460,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await onMeasure($, e.context?.percent ?? 0)
+    await onMeasure($, (e.context?.tokens ?? 0) / 1000)
     return next(e)
   })
 }
