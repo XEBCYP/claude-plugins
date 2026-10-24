@@ -146,10 +146,21 @@ async function contextK($: Dollar): Promise<number> {
   return (context.tokens ?? 0) / 1000
 }
 
+// Пороги меньше 100 — проценты окна из версии 1.x (from 30, to 50): в тысячах токенов они дали бы вопрос
+// почти в каждой сессии. Такие пороги не берутся — берутся умолчания, при старте сессии — предупреждение.
+const STALE_BELOW = 100
+let staleKeys: string[] = []
+
 function limits(raw: Record<string, unknown>, prefix: string, fallback: Limits): Limits {
   const key = (name: string) => (prefix ? prefix + name[0].toUpperCase() + name.slice(1) : name)
-  const f = num(raw[key('from')], fallback.from)
-  return { from: f, to: Math.max(num(raw[key('to')], fallback.to), f), askStep: num(raw[key('askStep')], fallback.askStep) }
+  let f = num(raw[key('from')], fallback.from)
+  let t = num(raw[key('to')], fallback.to)
+  if (f < STALE_BELOW || t < STALE_BELOW) {
+    staleKeys.push(`${key('from')}/${key('to')} = ${f}/${t}`)
+    f = fallback.from
+    t = fallback.to
+  }
+  return { from: f, to: Math.max(t, f), askStep: num(raw[key('askStep')], fallback.askStep) }
 }
 
 async function chooseLimits($: Dollar, cwd: string): Promise<void> {
@@ -395,6 +406,7 @@ async function onMeasure($: Dollar, ctx: number): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
+  staleKeys = []
   usual = limits(options, '', { from: 150, to: 250, askStep: 50 })
   global = limits(options, 'global', { from: 120, to: 180, askStep: 30 })
   ;({ from, to, askStep } = usual)
@@ -407,6 +419,12 @@ export const register: Register = (on, options) => {
         name: 'autohandoff',
         description: 'Автопередача в чистый контекст: now — передать сейчас, off/on — выключить/включить для этой сессии, status',
       })
+    }
+    if (staleKeys.length && e.isInteractive) {
+      $.ui.toast(
+        `autohandoff: в настройках старые пороги в процентах (${staleKeys.join(', ')}) — взяты умолчания в тысячах токенов. Поправьте настройки плагина`,
+        { timeoutMs: 10000 },
+      )
     }
     await chooseLimits($, e.cwd ?? '')
     await loadMark($)

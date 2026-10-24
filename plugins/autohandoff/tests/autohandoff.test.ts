@@ -14,6 +14,7 @@ type Env = {
   asks: number
   answer: string
   forkHangs?: boolean
+  toasts?: string[]
 }
 
 function engine(on: any, env: Env) {
@@ -59,7 +60,10 @@ function engine(on: any, env: Env) {
     const q = e.questions[0].question
     return { result: { questions: e.questions, answers: { [q]: env.answer } } }
   })
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: unknown, e: { text: string }) => {
+    env.toasts?.push(e.text)
+    return { value: undefined }
+  })
   on('session.measure', (_: unknown, e: { changed: string[] }) => ({ changed: e.changed }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
@@ -320,6 +324,32 @@ test('обычная сессия на 130 тыс. — ещё рано', async (
   env.k = 130
   engine(on, env)
   await $.session.start({ cwd: 'C:\\Projects\\Sub', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const r = await $.prompt.submit(userPrompt('дальше') as never)
+  expect('drop' in r && r.drop !== undefined).toBe(false)
+  expect(env.forks).toBe(0)
+})
+
+test('старые пороги в процентах (from 30, to 50) не берутся — умолчания и предупреждение', { options: { from: 30, to: 50 } }, async ($, on) => {
+  const env = fresh()
+  env.k = 60
+  env.toasts = []
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  expect(env.toasts.some(t => t.includes('from/to = 30/50'))).toBe(true)
+  await finishTask($, 't1')
+  const r = await $.prompt.submit(userPrompt('дальше') as never)
+  expect('drop' in r && r.drop !== undefined).toBe(false)
+  expect(env.forks).toBe(0)
+})
+
+test('пороги в тысячах (from 160) берутся без предупреждения', { options: { from: 160, to: 260 } }, async ($, on) => {
+  const env = fresh()
+  env.k = 155
+  env.toasts = []
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  expect(env.toasts).toEqual([])
   await finishTask($, 't1')
   const r = await $.prompt.submit(userPrompt('дальше') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
