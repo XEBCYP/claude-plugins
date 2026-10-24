@@ -2,7 +2,10 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Под модом нет движка: хуки теста отвечают за него. Вызов на `$` отвечается `{ value }`, событие — своим результатом.
 type Env = {
-  percent: number
+  // Контекст, тыс. токенов
+  k: number
+  // Папка, в которой лежит реестр подпроектов (глобальная сессия sreda)
+  globalCwd?: string
   fork: string | null
   forks: number
   commands: string[]
@@ -22,12 +25,16 @@ function engine(on: any, env: Env) {
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.surfaces', () => ({ value: ['desktop'] }))
   on('session.usage', () => ({
-    value: { startedAt: 0, context: { window: 1_000_000, tokens: env.percent * 10_000, percent: env.percent }, rateLimits: [] },
+    value: { startedAt: 0, context: { window: 1_000_000, tokens: env.k * 1000, percent: env.k / 10 }, rateLimits: [] },
   }))
   on('agent.list', () => ({ value: [] }))
-  on('fs.stat', () => {
+  on('fs.stat', (_: unknown, e: { path: string }) => {
+    // Движок отдаёт путь в виде ОС (на Windows — с обратной косой)
+    if (env.globalCwd && e.path.replace(/\\/g, '/') === `${env.globalCwd}/docs/Подпроекты.md`) {
+      return { value: { kind: 'file', mtimeMs: 0, size: 10, isLink: false } }
+    }
     if (env.written === null) throw new Error('ENOENT')
-    return { value: { mtimeMs: env.written, size: 10, isFile: true, isDirectory: false } }
+    return { value: { kind: 'file', mtimeMs: env.written, size: 10, isLink: false } }
   })
   on('model.fork', async () => {
     env.forks += 1
@@ -60,7 +67,7 @@ function engine(on: any, env: Env) {
 }
 
 function fresh(): Env {
-  return { percent: 40, fork: 'ДА', forks: 0, commands: [], submits: [], written: null, asks: 0, answer: 'Не сейчас' }
+  return { k: 200, fork: 'ДА', forks: 0, commands: [], submits: [], written: null, asks: 0, answer: 'Не сейчас' }
 }
 
 async function finishTask($: any, turnId: string, ask?: string): Promise<void> {
@@ -119,9 +126,9 @@ test('итоговое окно задало вопрос — сообщение
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
 
-test('ниже 30 % — ничего не делает', async ($, on) => {
+test('ниже 150 тыс. токенов — ничего не делает', async ($, on) => {
   const env = fresh()
-  env.percent = 20
+  env.k = 100
   engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
   await finishTask($, 't1')
@@ -131,7 +138,7 @@ test('ниже 30 % — ничего не делает', async ($, on) => {
   expect(env.forks).toBe(0)
 })
 
-test('проверка ответила НЕТ — сообщение идёт как обычно, переспрос только через +5 %', async ($, on) => {
+test('проверка ответила НЕТ — сообщение идёт как обычно, переспрос только через +20 тыс.', async ($, on) => {
   const env = fresh()
   env.fork = 'НЕТ'
   engine(on, env)
@@ -143,12 +150,12 @@ test('проверка ответила НЕТ — сообщение идёт �
   expect(env.forks).toBe(1)
 
   await finishTask($, 't2')
-  env.percent = 42
+  env.k = 210
   await $.prompt.submit(userPrompt('ещё вопрос') as never)
   expect(env.forks).toBe(1)
 
   await finishTask($, 't3')
-  env.percent = 46
+  env.k = 225
   await $.prompt.submit(userPrompt('и ещё') as never)
   expect(env.forks).toBe(2)
 })
@@ -183,8 +190,8 @@ test('документ не записан — передача отменена
   expect(env.commands).not.toContain('clear')
   expect(env.submits).toEqual(['Новая задача'])
 })
-async function measure($: any, percent: number): Promise<void> {
-  await $.session.measure({ context: { window: 1_000_000, tokens: percent * 10_000, percent }, rateLimits: [], changed: ['context'] } as never)
+async function measure($: any, k: number): Promise<void> {
+  await $.session.measure({ context: { window: 1_000_000, tokens: k * 1000, percent: k / 10 }, rateLimits: [], changed: ['context'] } as never)
 }
 
 test('сообщение с упоминанием файла (@путь) не придерживается', async ($, on) => {
@@ -201,8 +208,8 @@ test('лимит в час считает и неудачные попытки',
   const env = fresh()
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
-  for (const [i, ctx] of [[1, 40], [2, 46]] as const) {
-    env.percent = ctx
+  for (const [i, ctx] of [[1, 200], [2, 225]] as const) {
+    env.k = ctx
     await finishTask($, `a${i}`)
     await $.prompt.submit(userPrompt(`задача ${i}`) as never)
     await clock.settle()
@@ -212,25 +219,25 @@ test('лимит в час считает и неудачные попытки',
     await clock.settle()
   }
   expect(env.forks).toBe(2)
-  env.percent = 49
+  env.k = 245
   await finishTask($, 'a3')
   const r = await $.prompt.submit(userPrompt('задача 3') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
   expect(env.forks).toBe(2)
 })
 
-test('с 50 % — вопрос; «Не сейчас» — снова только через +10 %', async ($, on) => {
+test('с 250 тыс. — вопрос; «Не сейчас» — снова только через +50 тыс.', async ($, on) => {
   const env = fresh()
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
-  await measure($, 52)
+  await measure($, 260)
   await clock.settle()
   expect(env.asks).toBe(1)
-  await measure($, 58)
+  await measure($, 300)
   await clock.settle()
   expect(env.asks).toBe(1)
   env.answer = 'Передать'
-  await measure($, 63)
+  await measure($, 315)
   await clock.settle()
   expect(env.asks).toBe(2)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
@@ -254,13 +261,13 @@ test('после передачи: в чистой сессии мод вклю�
   const r = await $.prompt.submit(userPrompt('ещё') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
   const forks = env.forks
-  // Контекст спал ниже 30 % — мод снова включён
-  await measure($, 12)
-  env.percent = 12
+  // Контекст спал ниже 150 тыс. — мод снова включён
+  await measure($, 100)
+  env.k = 100
   await finishTask($, 't4')
   await $.prompt.submit(userPrompt('дальше') as never)
   expect(env.forks).toBe(forks)
-  env.percent = 35
+  env.k = 170
   await finishTask($, 't5')
   await $.prompt.submit(userPrompt('и ещё') as never)
   expect(env.forks).toBe(forks + 1)
@@ -279,4 +286,42 @@ test('проверка зависла — через 30 с сообщение у
   expect('drop' in r && r.drop !== undefined).toBe(false)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
   await clock.settle()
+})
+
+test('глобальная сессия (в папке реестр подпроектов) — свои пороги: 120 тыс. и вопрос со 180 тыс.', async ($, on) => {
+  const env = fresh()
+  env.globalCwd = 'C:/Projects/Global'
+  env.k = 130
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true } as never)
+  await measure($, 175)
+  await clock.settle()
+  expect(env.asks).toBe(0)
+  await measure($, 185)
+  await clock.settle()
+  expect(env.asks).toBe(1)
+  // «Не сейчас» — снова через +30 тыс.
+  await measure($, 210)
+  await clock.settle()
+  expect(env.asks).toBe(1)
+  await measure($, 216)
+  await clock.settle()
+  expect(env.asks).toBe(2)
+
+  await finishTask($, 't1')
+  await $.prompt.submit(userPrompt('дальше') as never)
+  expect(env.forks).toBe(1)
+  await clock.settle()
+})
+
+test('обычная сессия на 130 тыс. — ещё рано', async ($, on) => {
+  const env = fresh()
+  env.globalCwd = 'C:/Projects/Global'
+  env.k = 130
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Sub', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const r = await $.prompt.submit(userPrompt('дальше') as never)
+  expect('drop' in r && r.drop !== undefined).toBe(false)
+  expect(env.forks).toBe(0)
 })
