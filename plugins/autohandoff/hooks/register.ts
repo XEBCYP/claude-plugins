@@ -3,7 +3,7 @@ import type { Hook, Register } from 'claude-code'
 // Автопередача работы в чистый контекст (замена моду handoff).
 //
 // Окно поиска момента — от `from` до `to` тысяч токенов контекста (по умолчанию 150–250; в глобальной сессии
-// sreda — `globalFrom`–`globalTo`, 120–180). Пороги в токенах, а не в процентах окна: цена каждого действия растёт
+// sreda — `globalFrom`–`globalTo`, 150–200). Пороги в токенах, а не в процентах окна: цена каждого действия растёт
 // с числом токенов в контексте, а процент при окне в 1 млн означает в 5 раз больше, чем при 200 тыс. Передача делается, когда
 // пользователь отправляет следующее сообщение после законченной задачи: прошлый ход закончился без прерывания,
 // итоговое окно приложения (wrap_up) не задало вопроса, фоновых агентов нет, и проверка по самому разговору
@@ -87,7 +87,7 @@ const CHECK_PROMPT = `Служебный вопрос мода автопере�
 // Пороги из настроек мода, тыс. токенов; задаются в register, для глобальной сессии — в session.start
 type Limits = { from: number; to: number; askStep: number }
 let usual: Limits = { from: 150, to: 250, askStep: 50 }
-let global: Limits = { from: 120, to: 180, askStep: 30 }
+let global: Limits = { from: 150, to: 200, askStep: 30 }
 let from = usual.from
 let to = usual.to
 let askStep = usual.askStep
@@ -408,7 +408,7 @@ async function onMeasure($: Dollar, ctx: number): Promise<void> {
 export const register: Register = (on, options) => {
   staleKeys = []
   usual = limits(options, '', { from: 150, to: 250, askStep: 50 })
-  global = limits(options, 'global', { from: 120, to: 180, askStep: 30 })
+  global = limits(options, 'global', { from: 150, to: 200, askStep: 30 })
   ;({ from, to, askStep } = usual)
   perHour = num(options.perHour, 2)
   mark = freshMark()

@@ -292,23 +292,23 @@ test('проверка зависла — через 30 с сообщение у
   await clock.settle()
 })
 
-test('глобальная сессия (в папке реестр подпроектов) — свои пороги: 120 тыс. и вопрос со 180 тыс.', async ($, on) => {
+test('глобальная сессия (в папке реестр подпроектов) — свои пороги: 150 тыс. и вопрос с 200 тыс.', async ($, on) => {
   const env = fresh()
   env.globalCwd = 'C:/Projects/Global'
-  env.k = 130
+  env.k = 160
   const clock = engine(on, env)
   await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true } as never)
-  await measure($, 175)
+  await measure($, 195)
   await clock.settle()
   expect(env.asks).toBe(0)
-  await measure($, 185)
+  await measure($, 205)
   await clock.settle()
   expect(env.asks).toBe(1)
   // «Не сейчас» — снова через +30 тыс.
-  await measure($, 210)
+  await measure($, 230)
   await clock.settle()
   expect(env.asks).toBe(1)
-  await measure($, 216)
+  await measure($, 236)
   await clock.settle()
   expect(env.asks).toBe(2)
 
@@ -316,6 +316,18 @@ test('глобальная сессия (в папке реестр подпро
   await $.prompt.submit(userPrompt('дальше') as never)
   expect(env.forks).toBe(1)
   await clock.settle()
+})
+
+test('глобальная сессия на 140 тыс. — ещё рано: новая сессия входит в работу на 90–120 тыс.', async ($, on) => {
+  const env = fresh()
+  env.globalCwd = 'C:/Projects/Global'
+  env.k = 140
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const r = await $.prompt.submit(userPrompt('дальше') as never)
+  expect('drop' in r && r.drop !== undefined).toBe(false)
+  expect(env.forks).toBe(0)
 })
 
 test('обычная сессия на 130 тыс. — ещё рано', async ($, on) => {
