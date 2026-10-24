@@ -42,5 +42,6 @@
 ```
 
 Установщик маркетплейса (`scripts/install.ps1`, `install.sh`) включает его сам. Отдельный плагин `zhdut-otveta`
-заменён этим: из маркетплейса он убран, Claude Code удалит его сам; строку `zhdut-otveta@xebcyp-plugins` в
-`~/.claude/settings.json` можно удалить.
+заменён этим и убран из маркетплейса. Убранные плагины Claude Code удаляет сам (раздел Flagged в `/plugin`); пока
+старая копия включена, панели будет две — выключите `zhdut-otveta` в `/plugin` и удалите строку
+`zhdut-otveta@xebcyp-plugins` из `~/.claude/settings.json`.
