@@ -103,10 +103,30 @@ async function refresh($: any): Promise<void> {
     if (!it?.answer || it.answeredIn === mine) continue
     const reply = waiting.get(id)
     if (reply) reply(it.picked ?? it.answer)
-    else if (it.answeredIn) {
-      void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${it.answer}`, asUser: true })
-    }
+    else if (it.answeredIn) tell($, it, it.picked ?? it.answer)
   }
+}
+
+// Ответ кнопкой на вопрос этой сессии, окна которого уже нет. Пока идёт ход, сообщение встало бы в очередь приложения
+// «после хода»: Claude его не видит и по «Не отвечено» задаёт вопрос снова — пользователь отвечает дважды. Поэтому
+// ответ ждёт здесь: повтор вопроса окном сразу получает его без окна, а не спрошенный повтором — приходит после хода.
+// Текст вопроса → откуда и ответ.
+const later = new Map<string, { from: string; answer: Answer }>()
+let busy = false
+
+function tell($: any, it: Pending, answer: Answer): void {
+  if (busy) {
+    later.set(it.question, { from: it.from, answer })
+    return
+  }
+  void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${asText(answer)}`, asUser: true })
+}
+
+function flush($: any): void {
+  for (const [question, { from, answer }] of later) {
+    void $.prompt.submit({ text: `Ответ на вопрос «${question}» (${from}): ${asText(answer)}`, asUser: true })
+  }
+  later.clear()
 }
 
 async function press($: any, it: Pending, answer: Answer): Promise<void> {
@@ -115,7 +135,7 @@ async function press($: any, it: Pending, answer: Answer): Promise<void> {
   if (reply) return reply(answer)
   // Окно в другой сессии — она ответит ему сама при опросе файла
   if (it.session && it.session !== (await self($))) return
-  void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${asText(answer)}`, asUser: true })
+  tell($, it, answer)
 }
 
 // Claude сам файл панели не пишет: вопрос, записанный вручную, а потом заданный окном чуть другими словами, вставал в
@@ -203,7 +223,8 @@ function notAnswered(tool: string): string {
     '[Не отвечено: пользователь отправил сообщение, не нажав кнопку окна. Вопрос остаётся в панели «Ждут ответа». ' +
     'Если его сообщение явно отвечает на этот вопрос или отказывается отвечать («не сейчас», «не отвечу»), — ' +
     `инструмент ${tool} с этим ответом. Иначе сообщение — новое задание, а не ответ: выполните его, а в конце хода ` +
-    'задайте этот вопрос окном AskUserQuestion снова, теми же словами.]'
+    'задайте этот вопрос окном AskUserQuestion снова, теми же словами: если пользователь тем временем ответил в ' +
+    'панели, окно не покажется, а сразу вернёт этот ответ.]'
   )
 }
 
@@ -274,7 +295,9 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
 }
 
 export const register: Register = on => {
-  registerUroven(on)
+  // Ход сессии идёт — ответы кнопкой на вопросы без окна ждут его конца (tell). Начало хода — один хук на модуль, он
+  // в uroven.ts
+  registerUroven(on, () => (busy = true))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'zhdut-otveta', description: 'Открыть панель «Ждут ответа»' })
@@ -302,10 +325,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Строка под полем ввода: токены и лимиты — после каждого ответа и когда движок пересчитал расход
+  // Конец хода: не спрошенные повтором ответы из панели — сообщениями; строка под полем ввода — новые токены и лимиты
   on('turn.complete', async ($, e, next) => {
     // Ход агента — не ответ сессии: цифры переписки от него не меняются
-    if (e.agentId === undefined) void measure($)
+    if (e.agentId === undefined) {
+      busy = false
+      flush($)
+      void measure($)
+    }
     return next(e)
   })
   on('session.measure', async ($, e, next) => {
@@ -338,7 +365,22 @@ export const register: Register = on => {
   // Окно вопроса Claude: ждём, кто ответит первым — окно или кнопка панели. Вопросы других плагинов не трогаем.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (next.origin.plugin !== 'engine') return next(e)
-    const questions = e.questions as Question[]
+    const all = e.questions as Question[]
+    // Повтор вопроса, на который пользователь уже ответил кнопкой панели, пока шёл ход: ответ сразу, без окна и без
+    // новой записи в панели; в окне — только остальные вопросы
+    const known: Record<string, Answer> = {}
+    const took = new Map<string, { from: string; answer: Answer }>()
+    for (const q of all) {
+      const got = later.get(q.question)
+      if (!got) continue
+      known[q.question] = asText(got.answer)
+      took.set(q.question, got)
+      later.delete(q.question)
+    }
+    const questions = all.filter(q => known[q.question] === undefined)
+    if (questions.length === 0) return { result: { questions: e.questions, answers: known } } as never
+    const ask = questions.length === all.length ? e : { ...e, questions }
+    let delivered = false
     const answers: Record<string, Answer> = {}
     let done = (_: Record<string, Answer>) => {}
     const fromPane = new Promise<Record<string, Answer>>(resolve => (done = resolve))
@@ -354,11 +396,14 @@ export const register: Register = on => {
     )
 
     try {
-      const dialog = next(e).then(r => ({ dialog: r }))
+      const dialog = next(ask).then(r => ({ dialog: r }))
       // Окно закрыто ответом из панели — его поздний отказ уже никому не нужен
       dialog.catch(() => {})
       const won = await Promise.race([dialog, fromPane.then(a => ({ pane: a }))])
-      if ('pane' in won) return { result: { questions: e.questions, answers: won.pane } } as never
+      if ('pane' in won) {
+        delivered = true
+        return { result: { questions: e.questions, answers: { ...known, ...won.pane } } } as never
+      }
 
       const r = won.dialog
       const got = r.deny === undefined && !r.isError
@@ -380,12 +425,23 @@ export const register: Register = on => {
           told[q] = notAnswered(answeredTool)
         }
       }
-      if (Object.keys(got).every(q => told[q] === got[q])) return r
+      const mixed = Object.keys(known).length > 0 && r.deny === undefined && !r.isError
+      if (!mixed && Object.keys(got).every(q => told[q] === got[q])) return r
       if (missed.length > 0) await markMissed($, missed)
-      // Свой { result } без ref ядра: с ref ядро взяло бы свой текст результата — с заглушкой «do not re-ask»
-      return { result: { ...(r.result as object), answers: told }, ...(r.context ? { context: r.context } : {}) } as never
+      delivered = true
+      // Свой { result } без ref ядра: с ref ядро взяло бы свой текст результата — с заглушкой «do not re-ask» и без
+      // ответов, взятых из панели
+      return {
+        result: { ...(r.result as object), questions: e.questions, answers: { ...known, ...told } },
+        ...(r.context ? { context: r.context } : {}),
+      } as never
     } finally {
       ids.forEach(id => waiting.delete(id))
+      // Взятые из панели ответы не дошли до Claude (окно отклонено, ход прерван) — не терять: сообщением после хода
+      if (!delivered && took.size > 0) {
+        took.forEach((one, q) => later.set(q, one))
+        if (!busy) flush($)
+      }
     }
   })
 
