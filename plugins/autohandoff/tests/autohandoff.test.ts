@@ -15,6 +15,13 @@ type Env = {
   answer: string
   forkHangs?: boolean
   toasts?: string[]
+  // id диалога; после /clear приложение может дать новый
+  id?: string
+  // Хранилище мода при старте и экраны сессии
+  store?: Record<string, unknown>
+  surfaces?: string[]
+  // CLAUDE_CODE_ENTRYPOINT процесса
+  entrypoint?: string
 }
 
 // Часы теста: finishTask даёт договорить проверке в конце хода
@@ -23,12 +30,12 @@ let clockRef: any = null
 function engine(on: any, env: Env) {
   const clock = mock.clock(on, { now: 1_000_000 })
   clockRef = clock
-  mock.store(on)
-  mock.env(on, { USERPROFILE: 'C:\\Users\\tester' })
+  mock.store(on, env.store)
+  mock.env(on, { USERPROFILE: 'C:\\Users\\tester', ...(env.entrypoint ? { CLAUDE_CODE_ENTRYPOINT: env.entrypoint } : {}) })
   on('command.register', () => ({ value: { command: 'autohandoff' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('session.id', () => ({ value: env.id ?? 'sess-1' }))
+  on('session.surfaces', () => ({ value: env.surfaces ?? ['desktop'] }))
   on('session.usage', () => ({
     value: { startedAt: 0, context: { window: 1_000_000, tokens: env.k * 1000, percent: env.k / 10 }, rateLimits: [] },
   }))
@@ -52,6 +59,7 @@ function engine(on: any, env: Env) {
   })
   on('command.run', (_: unknown, e: { command: string; args: string }) => {
     env.commands.push(`${e.command} ${e.args}`.trim())
+    if (e.command === 'clear' && env.id) env.id += '+'
     return { text: '' }
   })
   on('prompt.submit', (_: unknown, e: { text: string }) => {
@@ -461,4 +469,61 @@ test('пороги в тысячах (from 160) берутся без преду
   const r = await $.prompt.submit(userPrompt('дальше') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
   expect(env.forks).toBe(0)
+})
+
+test('сессия приложения (isInteractive false, экрана нет) — с 250 тыс. в конце хода передача сама', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  env.surfaces = []
+  env.entrypoint = 'claude-desktop'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
+  await finishTask($, 't1')
+  await clock.advance(6000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+})
+
+test('попытки других сессий не тратят лимит этой', async ($, on) => {
+  const env = fresh()
+  // Общий счётчик версии 2.1.0: две свежие попытки чужих сессий
+  env.store = { times: [1_000_000, 1_000_000] }
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  await clock.advance(6000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+})
+
+test('лимит в час переходит в чистую сессию после /clear', { options: { perHour: 1 } }, async ($, on) => {
+  const env = fresh()
+  env.id = 'a'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  await $.prompt.submit(userPrompt('новая задача') as never)
+  await clock.settle()
+  await $.turn.start({ text: '', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.commands).toContain('clear')
+  // Чистая сессия: контекст спал и снова вырос — попытка за этот час уже была
+  await measure($, 100)
+  env.k = 300
+  await finishTask($, 't2')
+  await clock.advance(6000)
+  expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(1)
+})
+
+test('запуск -p или SDK (isInteractive false, не приложение) — в конце хода передачи нет', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  env.surfaces = []
+  env.entrypoint = 'sdk-cli'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
+  await finishTask($, 't1')
+  await clock.advance(6000)
+  expect(env.forks).toBe(0)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
