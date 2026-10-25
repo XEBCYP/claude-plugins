@@ -14,10 +14,12 @@ import type { Band } from '../types'
 // сообщение, Claude пишет документ передачи (навык autohandoff:write), мод делает /clear, отправляет «прочитай
 // документ», а следом — придержанное сообщение пользователя.
 //
-// Пользователь может и не написать — отошёл от компьютера. Поэтому и в конце хода, без его сообщения, тот же
-// удачный момент (вопрос в итоговом окне не мешает — он уйдёт в документ) даёт полосу над полем ввода: «через
-// `countdown` с передам» с кнопками «Пауза» (дочитать; передача — кнопкой «Передать»), «Передать», «Отменить».
+// Пользователь может и не написать — отошёл от компьютера или сессия не на экране. Поэтому и в конце хода, без его
+// сообщения, тот же удачный момент (вопрос в итоговом окне не мешает — он уйдёт в документ) даёт полосу над полем
+// ввода: «через `countdown` с передам» с кнопками «Пауза» (дочитать; передача — кнопкой «Передать»), «Передать», «Отменить».
 // Никто не нажал — передача. С `to` — то же в конце хода, без проверки момента; посреди хода не передаём.
+// Конец хода — только там, где за сессией стоит человек: терминал (isInteractive) или приложение Claude. Сессия
+// приложения стартует с isInteractive false, как -p и SDK, и отличается от них переменной CLAUDE_CODE_ENTRYPOINT.
 // «Отменить» — снова не раньше +`askStep` (50 тыс., в глобальной — `globalAskStep`, 30 тыс.). Последний ответ
 // с экрана пропадёт — новая сессия начнёт с его пересказа и заново задаст открытый вопрос окном.
 // /autohandoff now | off | on | status.
@@ -56,6 +58,8 @@ type Mark = {
   // «Отменить» на полосе: до скольких тысяч токенов полосы больше нет
   quietBelow: number
   lastTurn: LastTurn | null
+  // Попытки передачи этой сессии (удачные и нет); после /clear переходят в чистую — против передач по кругу
+  times: number[]
   at: number
 }
 
@@ -71,9 +75,11 @@ const REARM_DROP = 50
 const GLOBAL_MARKER = 'docs/Подпроекты.md'
 const HOUR = 60 * 60_000
 const K_SESSION = 's:'
-const K_TIMES = 'times'
+// Общий счётчик попыток всех сессий из версии 2.1.0 — убирается
+const K_OLD_TIMES = 'times'
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 const USER_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
+const DESKTOP_ENTRYPOINT = 'claude-desktop'
 // Упоминание файла (@путь): при повторной отправке оно не раскрывается — такое сообщение не придерживаем
 const MENTION = /(^|\s)@[^\s@]/
 
@@ -122,7 +128,8 @@ let countdown = 5
 let cliId = ''
 let mark: Mark = freshMark()
 let isChecking = false
-let isInteractive = false
+// За сессией стоит человек (терминал или приложение): в -p и SDK конец хода не передаёт
+let isPersonal = false
 // Идёт ход основного цикла: проверка в конце хода, которую догнал новый ход, ничего не показывает
 let isTurnRunning = false
 // Проверка момента в конце хода — отдельно от проверки по сообщению: сообщения при ней не придерживаются
@@ -139,7 +146,7 @@ let lastOrigin = ''
 function freshMark(): Mark {
   return {
     unit: 'k', pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, quietBelow: 0,
-    lastTurn: null, at: 0,
+    lastTurn: null, times: [], at: 0,
   }
 }
 
@@ -155,22 +162,22 @@ async function save($: Dollar): Promise<void> {
 
 async function pruneMarks($: Dollar, now: number): Promise<void> {
   for (const key of await $.store.keys()) {
+    if (key === K_OLD_TIMES) await $.store.delete(key)
     if (!key.startsWith(K_SESSION)) continue
     const m = (await $.store.get(key)) as Mark | undefined
     if (!m || now - (m.at ?? 0) > MARK_TTL) await $.store.delete(key)
   }
 }
 
-// Попытки передачи за последний час — во всех диалогах вместе, удачные и нет
+// Попытки передачи этой сессии за последний час, удачные и нет
 async function recentTimes($: Dollar): Promise<number[]> {
   const now = await $.clock.now()
-  const times = ((await $.store.get(K_TIMES)) as number[] | undefined) ?? []
-  return times.filter(t => now - t < HOUR)
+  return (mark.times ?? []).filter(t => now - t < HOUR)
 }
 
 async function noteTime($: Dollar): Promise<void> {
-  const times = await recentTimes($)
-  await $.store.set(K_TIMES, [...times, await $.clock.now()])
+  mark = { ...mark, times: [...(await recentTimes($)), await $.clock.now()] }
+  await save($)
 }
 
 // Контекст в тысячах токенов
@@ -260,7 +267,7 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
     await $.command.run({ command: 'clear' })
     // После /clear у диалога может смениться id: отметка — с нуля; включится снова, когда контекст спадёт
     cliId = await $.session.id()
-    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP) }
+    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times }
     await save($)
     if (p.held.length) {
       await $.prompt.submit({
@@ -355,7 +362,7 @@ async function isAgentBusy($: Dollar): Promise<boolean> {
 
 // Конец хода основного цикла: удачный момент или верхний порог — полоса с отсчётом
 async function afterTurn($: Dollar, isAborted: boolean): Promise<void> {
-  if (!isInteractive || isAborted || mark.pending || mark.isOff || !mark.isArmed || bandNow || isChecking || isIdleChecking) return
+  if (!isPersonal || isAborted || mark.pending || mark.isOff || !mark.isArmed || bandNow || isChecking || isIdleChecking) return
   const ctx = await contextK($)
   if (ctx < from || ctx < mark.quietBelow) return
   if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return
@@ -531,14 +538,12 @@ export const register: Register = (on, options) => {
   mark = freshMark()
 
   on('session.start', async ($, e, next) => {
-    isInteractive = !!e.isInteractive
-    if (e.isInteractive) {
-      await $.command.register({
-        name: 'autohandoff',
-        description: 'Автопередача в чистый контекст: now — передать сейчас, off/on — выключить/включить для этой сессии, status',
-      })
-    }
-    if (staleKeys.length && e.isInteractive) {
+    isPersonal = !!e.isInteractive || (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) === DESKTOP_ENTRYPOINT
+    await $.command.register({
+      name: 'autohandoff',
+      description: 'Автопередача в чистый контекст: now — передать сейчас, off/on — выключить/включить для этой сессии, status',
+    })
+    if (staleKeys.length) {
       $.ui.toast(
         `autohandoff: в настройках старые пороги в процентах (${staleKeys.join(', ')}) — взяты умолчания в тысячах токенов. Поправьте настройки плагина`,
         { timeoutMs: 10000 },
