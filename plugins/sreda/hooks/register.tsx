@@ -19,6 +19,8 @@ const waiting = new Map<string, (label: string) => void>()
 // Открытые вопросы этой сессии при прошлом опросе — чтобы заметить, что их ответили в другой сессии
 let mineOpen = new Set<string>()
 let me = ''
+// Что панель показывает сейчас (JSON списка) — опрос перерисовывает её, только когда файл изменился
+let lastShown = ''
 
 // Файлы общие для всех сессий этого компьютера — в папке пользователя.
 async function file($: any, name = NAME): Promise<string> {
@@ -65,7 +67,12 @@ async function archive($: any, id: string, label: string): Promise<boolean> {
 
 async function refresh($: any): Promise<void> {
   const list = await load($)
-  await update($, items, () => list)
+  // Перерисовка — только когда список изменился: лишняя мешает набирать свой ответ
+  const shown = JSON.stringify(list)
+  if (shown !== lastShown) {
+    lastShown = shown
+    await update($, items, () => list)
+  }
   const mine = await self($)
   const now = new Set(list.filter(one => one.session === mine).map(one => one.id))
   const gone = [...mineOpen].filter(id => !now.has(id))
@@ -119,6 +126,15 @@ async function answered($: any, question: string, answer: string): Promise<strin
   }
   await archive($, found[0].id, answer)
   return `Вопрос «${found[0].question}» перенесён в архив с ответом «${answer}».`
+}
+
+// Набранный в панели свой ответ: id вопроса → текст
+const drafts = new Map<string, string>()
+
+function ownAnswer($: any, it: Pending, value: string): void {
+  if (!value.trim()) return
+  drafts.delete(it.id)
+  void press($, it, value.trim())
 }
 
 type Question = { question: string; header?: string; options?: { label: string; description?: string }[] }
@@ -263,15 +279,23 @@ export const register: Register = on => {
                 {opt.desc ? <Text dimColor>{opt.desc}</Text> : null}
               </Box>
             ))}
-            {/* Свой ответ, как «Other» в окне: уходит туда же, куда и кнопка */}
-            <Input
-              key={`${it.id}:own`}
-              placeholder="Свой ответ…"
-              submitLabel="ответить"
-              onSubmit={value => {
-                if (value.trim()) void press($, it, value.trim())
-              }}
-            />
+            {/* Свой ответ, как «Other» в окне: уходит туда же, куда и кнопка. Набранное держим в drafts — опрос
+                файла перерисовывает панель, и без value поле теряло текст и прыгало в начало */}
+            <Box flexDirection="row" gap={1} alignItems="flex-end">
+              <Box flexGrow={1} flexDirection="column">
+                <Input
+                  key={`${it.id}:own`}
+                  placeholder="Свой ответ…"
+                  rows={3}
+                  value={drafts.get(it.id) ?? ''}
+                  onInput={value => void drafts.set(it.id, value)}
+                  onSubmit={value => ownAnswer($, it, value)}
+                />
+              </Box>
+              <Button key={`${it.id}:send`} variant="secondary" onPress={() => ownAnswer($, it, drafts.get(it.id) ?? '')}>
+                Ответить
+              </Button>
+            </Box>
             <Text dimColor>Или ответьте в окне вопроса в чате — отсюда вопрос уйдёт сам.</Text>
           </Box>
         ))}

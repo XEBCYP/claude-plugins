@@ -252,3 +252,22 @@ test('свой ответ в панели — уходит в открытое �
   expect(env.submits).toEqual([])
   await ui.unmount()
 })
+
+test('свой ответ набран и не теряется при опросе файла — кнопка «Ответить» отправляет его', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = ask($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  const ui = await $.ui.mount(PANE)
+  await $.ui.input({ plugin: 'sreda', key: `${it.id}:own`, text: 'Слить, но после', kind: 'change' })
+  await clock.advance(3000)
+  await ui.press({ key: `${it.id}:send` })
+  const r = await pending
+
+  expect(r.result.answers[Q]).toBe('Слить, но после')
+  expect(env.submits).toEqual([])
+  await ui.unmount()
+})
