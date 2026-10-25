@@ -14,9 +14,15 @@ const ARCHIVE = 'zhdut-otveta-arhiv.json'
 // Опрос файла: так быстро кнопка другой сессии доходит до окна этой
 const POLL_MS = 1500
 const items = atom({ plugin: 'sreda', key: 'items' } as const, [] as Pending[])
+// Отмеченные флажки вопросов с несколькими ответами: их нажатие должно перерисовать панель — поэтому atom
+const picks = atom({ plugin: 'sreda', key: 'picked' } as const, {} as Record<string, string[]>)
+
+// Ответ: один вариант (или свой текст) — строка; несколько отмеченных — список (окно в приложении отдаёт и так)
+type Answer = string | string[]
+const asText = (answer: Answer) => (Array.isArray(answer) ? answer.join(', ') : answer)
 
 // Открытые окна этой сессии: id вопроса → ответить окну. Переменные модуля живут до перезагрузки плагина.
-const waiting = new Map<string, (label: string) => void>()
+const waiting = new Map<string, (answer: Answer) => void>()
 // Открытые вопросы этой сессии при прошлом опросе — чтобы заметить, что их ответили в другой сессии
 let mineOpen = new Set<string>()
 let me = ''
@@ -48,14 +54,19 @@ async function self($: any): Promise<string> {
 }
 
 // Убрать вопрос из рабочего файла в архив с ответом; false — его там уже нет (ответили в другом месте).
-async function archive($: any, id: string, label: string): Promise<boolean> {
+async function archive($: any, id: string, answer: Answer): Promise<boolean> {
   const list = await load($)
   const it = list.find(one => one.id === id)
   if (!it) return false
+  await update($, picks, all => {
+    const { [id]: _, ...rest } = all
+    return rest
+  })
   const done: Pending = {
     ...it,
     status: 'answered',
-    answer: label,
+    answer: asText(answer),
+    ...(Array.isArray(answer) ? { picked: answer } : {}),
     answeredAt: new Date().toISOString(),
     answeredIn: await self($),
   }
@@ -74,6 +85,11 @@ async function refresh($: any): Promise<void> {
     lastShown = shown
     await update($, items, () => list)
   }
+  // Отметки вопросов, которых в файле больше нет (ответили в другой сессии), — убрать
+  const marked = await read($, picks)
+  if (Object.keys(marked).some(id => !list.some(one => one.id === id))) {
+    await update($, picks, all => Object.fromEntries(Object.entries(all).filter(([id]) => list.some(one => one.id === id))))
+  }
   const mine = await self($)
   const now = new Set(list.filter(one => one.session === mine).map(one => one.id))
   const gone = [...mineOpen].filter(id => !now.has(id))
@@ -85,20 +101,20 @@ async function refresh($: any): Promise<void> {
     const it = done.find(one => one.id === id)
     if (!it?.answer || it.answeredIn === mine) continue
     const reply = waiting.get(id)
-    if (reply) reply(it.answer)
+    if (reply) reply(it.picked ?? it.answer)
     else if (it.answeredIn) {
       void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${it.answer}`, asUser: true })
     }
   }
 }
 
-async function press($: any, it: Pending, label: string): Promise<void> {
-  if (!(await archive($, it.id, label))) return
+async function press($: any, it: Pending, answer: Answer): Promise<void> {
+  if (!(await archive($, it.id, answer))) return
   const reply = waiting.get(it.id)
-  if (reply) return reply(label)
+  if (reply) return reply(answer)
   // Окно в другой сессии — она ответит ему сама при опросе файла
   if (it.session && it.session !== (await self($))) return
-  void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${label}`, asUser: true })
+  void $.prompt.submit({ text: `Ответ на вопрос «${it.question}» (${it.from}): ${asText(answer)}`, asUser: true })
 }
 
 // Claude сам файл панели не пишет: вопрос, записанный вручную, а потом заданный окном чуть другими словами, вставал в
@@ -138,7 +154,47 @@ function ownAnswer($: any, it: Pending, value: string): void {
   void press($, it, value.trim())
 }
 
-type Question = { question: string; header?: string; options?: { label: string; description?: string }[] }
+// Флажок вопроса с несколькими ответами: нажатие только ставит или снимает отметку
+async function toggle($: any, it: Pending, label: string): Promise<void> {
+  await update($, picks, all => {
+    const now = all[it.id] ?? []
+    const next = now.includes(label) ? now.filter(one => one !== label) : [...now, label]
+    return { ...all, [it.id]: next }
+  })
+}
+
+// «Ответить» в вопросе с несколькими ответами: отмеченные в порядке вариантов и свой текст последним
+async function sendPicked($: any, it: Pending, own: string): Promise<void> {
+  const marked = (await read($, picks))[it.id] ?? []
+  const answer = it.options.map(o => o.label).filter(label => marked.includes(label))
+  if (own.trim()) answer.push(own.trim())
+  if (answer.length === 0) return
+  drafts.delete(it.id)
+  await press($, it, answer)
+}
+
+type Question = {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options?: { label: string; description?: string; preview?: string }[]
+}
+
+// Команда для пользователя — первый блок ```powershell (или другого языка оболочки) в тексте вопроса, затем в preview
+// вариантов (правило kak-rabotat, раздел 3). Блок другого языка — пример кода или макет, не команда.
+const FENCE = /```(?:powershell|pwsh|ps1?|cmd|bat|bash|sh|shell|console)[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/i
+function commandOf(q: Question): string | undefined {
+  for (const text of [q.question, ...(q.options ?? []).map(o => o.preview ?? '')]) {
+    const found = FENCE.exec(text)?.[1]?.trim()
+    if (found) return found
+  }
+  return undefined
+}
+
+async function copyCommand($: any, it: Pending, surface: unknown): Promise<void> {
+  const r = await $.ui.copy({ text: it.command, surface })
+  $.ui.toast(r.isCopied ? 'Команда скопирована — вставьте её Ctrl+V' : `Не скопировалось: ${r.reason ?? 'причина неизвестна'}`)
+}
 
 // Вопросы окна — в панель. Тот же открытый вопрос, записанный раньше вручную, не дублируется, а становится нашим.
 // hold(ids) — до записи в файл: кнопка панели не должна застать вопрос, окно которого ещё не ждёт ответа.
@@ -151,6 +207,11 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
     const same = list.find(one => one.question === q.question)
     if (same) {
       same.session = mine
+      // Вид вопроса — по окну, а не по прежней записи: флажки и команда появляются и у такого вопроса
+      if (q.multiSelect) same.multi = true
+      else delete same.multi
+      const command = commandOf(q)
+      if (command) same.command = command
       return same.id
     }
     const options: Option[] = (q.options ?? []).map(o => ({
@@ -158,11 +219,14 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
       ...(o.description ? { desc: o.description } : {}),
     }))
     const id = `${callId}-${k}`
+    const command = commandOf(q)
     list.push({
       id,
       from: q.header ? `${project} · ${q.header}` : project,
       question: q.question,
       options,
+      ...(q.multiSelect ? { multi: true as const } : {}),
+      ...(command ? { command } : {}),
       status: 'open',
       asked: new Date().toISOString().slice(0, 10),
       session: mine,
@@ -228,14 +292,15 @@ export const register: Register = on => {
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (next.origin.plugin !== 'engine') return next(e)
     const questions = e.questions as Question[]
-    const answers: Record<string, string> = {}
-    let done = (_: Record<string, string>) => {}
-    const fromPane = new Promise<Record<string, string>>(resolve => (done = resolve))
+    const answers: Record<string, Answer> = {}
+    let done = (_: Record<string, Answer>) => {}
+    const fromPane = new Promise<Record<string, Answer>>(resolve => (done = resolve))
     const ids = await enlist($, questions, e.tool_use_id, held =>
       held.forEach((id, k) =>
-        waiting.set(id, label => {
+        waiting.set(id, answer => {
           waiting.delete(id)
-          answers[questions[k].question] = label
+          // Окну — строкой, как в схеме ответа AskUserQuestion: несколько вариантов через запятую
+          answers[questions[k].question] = asText(answer)
           if (Object.keys(answers).length === questions.length) done(answers)
         }),
       ),
@@ -250,11 +315,11 @@ export const register: Register = on => {
 
       const r = won.dialog
       const got = r.deny === undefined && !r.isError
-        ? ((r.result as { answers?: Record<string, string> })?.answers ?? {})
+        ? ((r.result as { answers?: Record<string, Answer> })?.answers ?? {})
         : {}
       for (const [k, id] of ids.entries()) {
-        const label = got[questions[k].question]
-        if (label) await archive($, id, label)
+        const answer = got[questions[k].question]
+        if (answer && answer.length > 0) await archive($, id, answer)
       }
       return r
     } finally {
@@ -263,8 +328,10 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Code } = $.ui.resolve(e)
     const open = (await read($, items)).filter(one => one.status !== 'answered')
+    const marked = await read($, picks)
+    const ticked = (it: Pending) => marked[it.id] ?? []
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -274,15 +341,34 @@ export const register: Register = on => {
             <Text dimColor>{it.from}</Text>
             <Text bold>{it.question}</Text>
             {it.why ? <Text>{it.why}</Text> : null}
+            {it.command ? (
+              <Box flexDirection="column" gap={1} borderStyle="round" padding={1}>
+                <Code source={it.command} language="powershell" />
+                <Button key={`${it.id}:copy`} variant="primary" onPress={(press: any) => void copyCommand($, it, press.surface)}>
+                  Скопировать команду
+                </Button>
+              </Box>
+            ) : null}
+            {it.multi ? <Text dimColor>Можно выбрать несколько: отметьте и нажмите «Ответить».</Text> : null}
             {it.options.map((opt, k) => (
               <Box key={`${it.id}-${k}`} flexDirection="column">
-                <Button
-                  key={`${it.id}:${k}`}
-                  variant={k === 0 ? 'primary' : 'secondary'}
-                  onPress={() => void press($, it, opt.label)}
-                >
-                  {opt.label}
-                </Button>
+                {it.multi ? (
+                  <Button
+                    key={`${it.id}:${k}`}
+                    variant={ticked(it).includes(opt.label) ? 'primary' : 'secondary'}
+                    onPress={() => void toggle($, it, opt.label)}
+                  >
+                    {`${ticked(it).includes(opt.label) ? '☑' : '☐'} ${opt.label}`}
+                  </Button>
+                ) : (
+                  <Button
+                    key={`${it.id}:${k}`}
+                    variant={k === 0 ? 'primary' : 'secondary'}
+                    onPress={() => void press($, it, opt.label)}
+                  >
+                    {opt.label}
+                  </Button>
+                )}
                 {opt.desc ? <Text dimColor>{opt.desc}</Text> : null}
               </Box>
             ))}
@@ -292,15 +378,21 @@ export const register: Register = on => {
               <Box flexGrow={1} flexDirection="column">
                 <Input
                   key={`${it.id}:own`}
-                  placeholder="Свой ответ…"
+                  placeholder={it.multi ? 'Свой вариант (добавится к отмеченным)…' : 'Свой ответ…'}
                   rows={3}
                   value={drafts.get(it.id) ?? ''}
                   onInput={value => void drafts.set(it.id, value)}
-                  onSubmit={value => ownAnswer($, it, value)}
+                  onSubmit={value => (it.multi ? void sendPicked($, it, value) : ownAnswer($, it, value))}
                 />
               </Box>
-              <Button key={`${it.id}:send`} variant="secondary" onPress={() => ownAnswer($, it, drafts.get(it.id) ?? '')}>
-                Ответить
+              <Button
+                key={`${it.id}:send`}
+                variant={ticked(it).length > 0 ? 'primary' : 'secondary'}
+                onPress={() =>
+                  it.multi ? void sendPicked($, it, drafts.get(it.id) ?? '') : ownAnswer($, it, drafts.get(it.id) ?? '')
+                }
+              >
+                {ticked(it).length > 0 ? `Ответить: выбрано ${ticked(it).length}` : 'Ответить'}
               </Button>
             </Box>
             <Text dimColor>Или ответьте в окне вопроса в чате — отсюда вопрос уйдёт сам.</Text>
