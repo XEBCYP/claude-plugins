@@ -170,10 +170,12 @@ export function urovenCall($: any, e: any, next: any): Promise<any> | undefined 
   return undefined
 }
 
-export function registerUroven(on: any): void {
+// started — начало хода основной сессии для register.tsx (второй хук turn.start в модуле движок не принимает)
+export function registerUroven(on: any, started: () => void = () => {}): void {
   // Ход пользователя: оценить сообщение. Ход без текста (продолжение, ответ агента) — уровень как был.
   on('turn.start', async ($: any, e: any, next: any) => {
     if (e.agentId === undefined) {
+      started()
       const wanted = judge(String(e.text ?? ''))
       if (wanted) await guess($, wanted)
     }

@@ -32,6 +32,12 @@ type Env = {
   gate?: Promise<void>
   // Ответы окна на каждый вопрос (окно с несколькими вопросами); ядро ставит на результат ref и text
   dialogAll?: Record<string, string | string[]>
+  // Сколько раз окно открывалось на самом деле
+  opened?: number
+  // Какие вопросы окно показало (тексты), по разу на окно
+  asked?: string[][]
+  // Окно отклонено (Esc)
+  deny?: boolean
 }
 
 const SKIPPED =
@@ -56,12 +62,17 @@ function engine(on: any, env: Env) {
     env.files[e.path.replace(/\\/g, '/')] = e.text
     return { value: undefined }
   })
+  on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('prompt.submit', (_: unknown, e: { text: string }) => {
     env.submits.push(e.text)
     return { text: e.text }
   })
   on('tool.call', async (_: unknown, e: any) => {
     if (e.tool !== 'AskUserQuestion') return { result: 'ran' }
+    env.opened = (env.opened ?? 0) + 1
+    env.asked?.push(e.questions.map((q: any) => q.question))
+    if (env.deny) return { deny: 'User declined to answer questions' }
     if (env.gate) await env.gate
     if (env.dialogAll) return { result: { questions: e.questions, answers: env.dialogAll }, ref: 7, text: 'core text' }
     if (env.dialog === null) await new Promise(() => {})
@@ -207,6 +218,95 @@ test('пропущенный вопрос: ответ кнопкой панел�
   expect(String(r.result)).toContain('перенесён')
   expect(list(env, MAIN)).toEqual([])
   expect(list(env, ARCHIVE).map(one => one.answer)).toEqual(['Нет', 'не сейчас'])
+})
+
+const TURN_END = { turnId: 't1', answer: 'готово', durationMs: 1, isAborted: false } as any
+
+test('ответ в панели, пока идёт ход, — повтор вопроса получает его без окна и без новой записи', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: SKIPPED }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'Новое задание', turnId: 't1' } as any)
+  await ask($)
+  const [it] = list(env, MAIN)
+
+  // Ход ещё идёт: ответ кнопкой не встаёт сообщением в очередь «после хода»
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:1` })
+  await ui.unmount()
+  expect(env.submits).toEqual([])
+  expect(list(env, MAIN)).toEqual([])
+
+  // Claude в конце хода задаёт вопрос снова — окно не открывается, ответ из панели приходит сразу
+  const again: any = await ask($)
+  expect(again.result.answers[Q]).toBe('Нет')
+  expect(env.opened).toBe(1)
+  expect(list(env, MAIN)).toEqual([])
+  expect(list(env, ARCHIVE).map(one => one.answer)).toEqual(['Нет'])
+
+  // Ответ уже отдан — после хода дубля сообщением нет
+  await $.turn.complete(TURN_END)
+  expect(env.submits).toEqual([])
+})
+
+test('ответ в панели, пока идёт ход, а повтора не было — сообщение приходит после хода, один раз', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: SKIPPED }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'Новое задание', turnId: 't1' } as any)
+  await ask($)
+  const [it] = list(env, MAIN)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:0` })
+  await ui.unmount()
+  expect(env.submits).toEqual([])
+
+  await $.turn.complete(TURN_END)
+  expect(env.submits).toEqual([`Ответ на вопрос «${Q}» (Demo · PR): Да`])
+  await $.turn.complete(TURN_END)
+  expect(env.submits.length).toBe(1)
+})
+
+test('два вопроса: один ответили в панели во время хода — повтор спрашивает в окне только второй', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null, dialogAll: { 'Первый?': SKIPPED, 'Второй?': SKIPPED } }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'Новое задание', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+  const first = list(env, MAIN).find(one => one.question === 'Первый?')
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${first.id}:0` })
+  await ui.unmount()
+
+  env.asked = []
+  env.dialogAll = { 'Второй?': 'Нет' }
+  const r: any = await $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+
+  expect(env.asked).toEqual([['Второй?']])
+  expect(r.result.answers).toEqual({ 'Первый?': 'Да', 'Второй?': 'Нет' })
+  expect(r.result.questions.length).toBe(2)
+  expect(list(env, MAIN)).toEqual([])
+})
+
+test('повтор с ответом из панели отклонён (Esc) — ответ не теряется, приходит после хода', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null, dialogAll: { 'Первый?': SKIPPED, 'Второй?': SKIPPED } }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'Новое задание', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+  const first = list(env, MAIN).find(one => one.question === 'Первый?')
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${first.id}:0` })
+  await ui.unmount()
+
+  env.dialogAll = undefined
+  env.deny = true
+  const r: any = await $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+  expect(r.deny).toBeDefined()
+  expect(env.submits).toEqual([])
+
+  await $.turn.complete(TURN_END)
+  expect(env.submits).toEqual(['Ответ на вопрос «Первый?» (Demo · А): Да'])
 })
 
 test('кнопка панели сразу отвечает на открытое окно своей сессии', async ($, on) => {
