@@ -30,7 +30,12 @@ type Env = {
   dialogMany?: string[]
   // Окно ещё не нарисовано, пока тест не отпустит
   gate?: Promise<void>
+  // Ответы окна на каждый вопрос (окно с несколькими вопросами); ядро ставит на результат ref и text
+  dialogAll?: Record<string, string | string[]>
 }
+
+const SKIPPED =
+  '[User did not answer this question — they sent a message instead. Treat that message as their response; do not re-ask.]'
 
 function engine(on: any, env: Env) {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -58,6 +63,7 @@ function engine(on: any, env: Env) {
   on('tool.call', async (_: unknown, e: any) => {
     if (e.tool !== 'AskUserQuestion') return { result: 'ran' }
     if (env.gate) await env.gate
+    if (env.dialogAll) return { result: { questions: e.questions, answers: env.dialogAll }, ref: 7, text: 'core text' }
     if (env.dialog === null) await new Promise(() => {})
     if (Array.isArray(env.dialogMany)) {
       return { result: { questions: e.questions, answers: { [e.questions[0].question]: env.dialogMany } } }
@@ -97,6 +103,110 @@ test('ответ в окне — вопрос сразу уходит из па�
   expect(done[0].answer).toBe('Да')
   expect(done[0].from).toBe('Demo · PR')
   expect(env.submits).toEqual([])
+})
+
+test('окно закрыто сообщением без ответа — вопрос остаётся в панели, Claude велено спросить снова', async ($, on) => {
+  // Так отвечает приложение, когда пользователь отправил сообщение, не нажав кнопку окна
+  const env: Env = { files: {}, submits: [], dialog: SKIPPED }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const r: any = await ask($)
+
+  const told = String(r.result.answers[Q])
+  expect(told).toContain('Не отвечено')
+  expect(told).toContain('mcp__sreda__otvecheno')
+  expect(told).toContain('задайте этот вопрос окном AskUserQuestion снова')
+  expect(told.includes('do not re-ask')).toBe(false)
+  expect(list(env, ARCHIVE)).toEqual([])
+  const [it] = list(env, MAIN)
+  expect(it.question).toBe(Q)
+  expect(typeof it.missed).toBe('string')
+
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /закрылось вашим сообщением/ })).toBeDefined()
+  await ui.unmount()
+
+  // Claude задаёт вопрос снова теми же словами — та же запись, без дубля и без пометки
+  env.dialog = null
+  void ask($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const again = list(env, MAIN)
+  expect(again.length).toBe(1)
+  expect(again[0].id).toBe(it.id)
+  expect(again[0].missed).toBeUndefined()
+})
+
+const TWO = [
+  { question: 'Первый?', header: 'А', multiSelect: false, options: [{ label: 'Да' }, { label: 'Нет' }] },
+  { question: 'Второй?', header: 'Б', multiSelect: false, options: [{ label: 'Да' }, { label: 'Нет' }] },
+]
+
+test('два вопроса: один ответили, на другой — сообщение; результат свой, без ref ядра', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null, dialogAll: { 'Первый?': 'Да', 'Второй?': SKIPPED } }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const r: any = await $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+
+  // С ref ядро показало бы модели свой текст — с заглушкой
+  expect(r.ref).toBeUndefined()
+  expect(r.text).toBeUndefined()
+  expect(r.result.answers['Первый?']).toBe('Да')
+  expect(String(r.result.answers['Второй?'])).toContain('Не отвечено')
+  expect(list(env, ARCHIVE).map(one => one.question)).toEqual(['Первый?'])
+  const open = list(env, MAIN)
+  expect(open.map(one => one.question)).toEqual(['Второй?'])
+  expect(typeof open[0].missed).toBe('string')
+})
+
+test('первый ответили кнопкой панели, потом сообщение — первый не «не отвечен»', async ($, on) => {
+  let release = () => {}
+  const env: Env = {
+    files: {},
+    submits: [],
+    dialog: null,
+    gate: new Promise<void>(resolve => (release = resolve)),
+    dialogAll: { 'Первый?': SKIPPED, 'Второй?': SKIPPED },
+  }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const call: Promise<any> = $.tool.call({ tool: 'AskUserQuestion', questions: TWO })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const first = list(env, MAIN).find(one => one.question === 'Первый?')
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${first.id}:0` })
+  await ui.unmount()
+  release()
+  const r = await call
+
+  expect(r.result.answers['Первый?']).toBe('Да')
+  expect(String(r.result.answers['Второй?'])).toContain('Не отвечено')
+  expect(list(env, MAIN).map(one => one.question)).toEqual(['Второй?'])
+  expect(list(env, ARCHIVE).map(one => one.question)).toEqual(['Первый?'])
+  expect(env.submits).toEqual([])
+})
+
+test('пропущенный вопрос: ответ кнопкой панели приходит в чат сообщением; «отвечено» уносит его', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: SKIPPED }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+  await ask($)
+  const [it] = list(env, MAIN)
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:1` })
+  await ui.unmount()
+  expect(env.submits).toEqual([`Ответ на вопрос «${Q}» (Demo · PR): Нет`])
+  expect(list(env, MAIN)).toEqual([])
+
+  // Второй раз: отказ текстом в чате — инструмент «отвечено»
+  await ask($)
+  const r: any = await $.tool.call({ tool: 'mcp__sreda__otvecheno', question: Q, answer: 'не сейчас' })
+  expect(String(r.result)).toContain('перенесён')
+  expect(list(env, MAIN)).toEqual([])
+  expect(list(env, ARCHIVE).map(one => one.answer)).toEqual(['Нет', 'не сейчас'])
 })
 
 test('кнопка панели сразу отвечает на открытое окно своей сессии', async ($, on) => {
