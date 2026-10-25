@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { Hook, Register } from 'claude-code'
+
+import type { Band } from '../types'
 
 // Автопередача работы в чистый контекст (замена моду handoff).
 //
@@ -9,11 +12,14 @@ import type { Hook, Register } from 'claude-code'
 // итоговое окно приложения (wrap_up) не задало вопроса, фоновых агентов нет, и проверка по самому разговору
 // ($.model.fork — без инструментов, по кэшу) ответила «ДА, можно передать без потерь». Тогда мод придерживает
 // сообщение, Claude пишет документ передачи (навык autohandoff:write), мод делает /clear, отправляет «прочитай
-// документ», а следом — придержанное сообщение пользователя. Ответ прошлой задачи пропадает с экрана только после
-// того, как пользователь его прочитал и написал новое.
+// документ», а следом — придержанное сообщение пользователя.
 //
-// С `to` — вопрос кнопкой «Передать?», как у handoff, даже посреди задачи; «Не сейчас» — снова через +`askStep`
-// (50 тыс., в глобальной — `globalAskStep`, 30 тыс.).
+// Пользователь может и не написать — отошёл от компьютера. Поэтому и в конце хода, без его сообщения, тот же
+// удачный момент (вопрос в итоговом окне не мешает — он уйдёт в документ) даёт полосу над полем ввода: «через
+// `countdown` с передам» с кнопками «Пауза» (дочитать; передача — кнопкой «Передать»), «Передать», «Отменить».
+// Никто не нажал — передача. С `to` — то же в конце хода, без проверки момента; посреди хода не передаём.
+// «Отменить» — снова не раньше +`askStep` (50 тыс., в глобальной — `globalAskStep`, 30 тыс.). Последний ответ
+// с экрана пропадёт — новая сессия начнёт с его пересказа и заново задаст открытый вопрос окном.
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
@@ -47,6 +53,8 @@ type Mark = {
   isOff: boolean
   // Контекст (тыс. токенов), на котором проверка момента ответила «нет»: следующая — не раньше +RECHECK_STEP
   checkedAt: number
+  // «Отменить» на полосе: до скольких тысяч токенов полосы больше нет
+  quietBelow: number
   lastTurn: LastTurn | null
   at: number
 }
@@ -84,6 +92,19 @@ const CHECK_PROMPT = `Служебный вопрос мода автопере�
 {text}
 >>>`
 
+const IDLE_PROMPT = `Служебный вопрос мода автопередачи — это не задача, ничего не делай, только ответь.
+Контекст сессии — {ctx} тыс. токенов. Ход только что закончился, пользователь пока ничего не написал (мог отойти).
+Можно ли сейчас БЕЗ ПОТЕРЬ передать работу новой чистой сессии, которая получит только документ передачи
+(требования, решения и их согласование, что сделано и что не проверено, изменённые файлы, открытые вопросы,
+список задач)?
+ДА — если задача закончена или стоит на чёткой границе шага, ничего важного не держится только в памяти разговора
+и мы не ждём результатов фоновых сессий или агентов. Вопрос пользователю в конце хода не мешает: он перейдёт
+в документ, и новая сессия задаст его снова.
+НЕТ — во всех остальных случаях, в том числе если сомневаешься.
+Ответь одним словом: ДА или НЕТ.`
+
+const band = atom({ plugin: 'autohandoff', key: 'band' } as const, null as Band | null)
+
 // Пороги из настроек мода, тыс. токенов; задаются в register, для глобальной сессии — в session.start
 type Limits = { from: number; to: number; askStep: number }
 let usual: Limits = { from: 150, to: 250, askStep: 50 }
@@ -93,13 +114,22 @@ let to = usual.to
 let askStep = usual.askStep
 let isGlobal = false
 let perHour = 2
+// Секунд отсчёта на полосе
+let countdown = 5
 
 // Приложение усыпляет простаивающие диалоги и будит их новым процессом: переменные модуля пропадают,
 // поэтому всё, что нужно между ходами, лежит в $.store под id диалога
 let cliId = ''
 let mark: Mark = freshMark()
-let isAsking = false
 let isChecking = false
+let isInteractive = false
+// Идёт ход основного цикла: проверка в конце хода, которую догнал новый ход, ничего не показывает
+let isTurnRunning = false
+// Проверка момента в конце хода — отдельно от проверки по сообщению: сообщения при ней не придерживаются
+let isIdleChecking = false
+// Полоса сейчас (то же, что в atom band) и номер отсчёта: пауза, отмена и новый отсчёт гасят старые тики
+let bandNow: Band | null = null
+let countGen = 0
 // Сообщения, пришедшие, пока шла проверка момента: уходят за первым — в чистую сессию или в эту
 let queued: string[] = []
 let turnWrap: LastTurn['wrap'] = 'none'
@@ -107,7 +137,10 @@ let turnWrap: LastTurn['wrap'] = 'none'
 let lastOrigin = ''
 
 function freshMark(): Mark {
-  return { unit: 'k', pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, lastTurn: null, at: 0 }
+  return {
+    unit: 'k', pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, quietBelow: 0,
+    lastTurn: null, at: 0,
+  }
 }
 
 function num(value: unknown, fallback: number): number {
@@ -193,7 +226,7 @@ async function startHandoff($: Dollar, held: string[], ctx: number): Promise<voi
   void $.clock.after(WAIT_MS + 1000, () => void checkPending($, null))
   const next = held.length
     ? `\n\nСледующая сессия начнёт с этого сообщения пользователя — построй документ под него, но сейчас его НЕ выполняй:\n<<<\n${held.join('\n\n')}\n>>>`
-    : ''
+    : '\n\nПользователь мог не прочитать последний ответ: запиши в документ итог последней задачи коротко и вопрос, который ему задан в конце (итоговое окно или окно вопроса), дословно с вариантами — если был.'
   try {
     await $.command.run({ command: 'autohandoff:write', args: `Сохрани документ в файл ${path}.${next}` })
   } catch (err: any) {
@@ -238,7 +271,9 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
         sent += 1
       }
     } else {
-      await $.prompt.submit({ text: `Прочитай ${p.path} и продолжай работу` })
+      await $.prompt.submit({
+        text: `Прочитай ${p.path} — это документ передачи работы из прошлой сессии (автопередача по заполнению контекста; пользователь мог не видеть последний ответ). Начни с короткого пересказа для пользователя: итог прошлой задачи и что сделано. Если в документе есть открытый вопрос к пользователю — задай его окном AskUserQuestion. Затем продолжай работу, если она не ждёт его ответа.`,
+      })
     }
   } catch (err: any) {
     $.ui.toast(`Передача не дошла до конца: ${String(err?.message ?? err).slice(0, 80)}. Документ — ${p.path}`)
@@ -262,26 +297,89 @@ async function checkPending($: Dollar, endedTurnId: string | null): Promise<void
   }
 }
 
-// С порога `to` — вопрос кнопкой, как у handoff
-async function offerHandoff($: Dollar, ctx: number): Promise<void> {
-  if (isAsking || mark.pending || !mark.isArmed || mark.isOff) return
-  // Диалог, который никто не видит (фоновая сессия): вопрос повис бы навсегда
-  if ((await $.session.surfaces()).length === 0) return
-  isAsking = true
-  try {
-    const answer = await $.ui.ask(`Контекст ${Math.round(ctx)} тыс. токенов. Передать работу в чистый контекст?`, {
-      header: 'Контекст',
-      options: ['Передать', 'Не сейчас'],
-    })
-    // Пока вопрос висел, передача могла пройти сама: тогда ответ уже ни к чему
-    if (answer === 'Передать' && mark.isArmed && !mark.pending) await startHandoff($, [], ctx)
-    else if (answer !== 'Передать') mark = { ...mark, askAt: Math.round(ctx) + askStep }
-  } catch {
-    mark = { ...mark, askAt: Math.round(ctx) + askStep }
-  } finally {
-    isAsking = false
-    await save($)
+async function setBand($: Dollar, next: Band | null): Promise<void> {
+  bandNow = next
+  await update($, band, () => next)
+}
+
+// Полоса с отсчётом: никто не нажал — передача
+async function startCountdown($: Dollar, ctx: number, isDue: boolean): Promise<void> {
+  if (bandNow || mark.pending) return
+  const gen = ++countGen
+  await setBand($, { left: countdown, isPaused: false, ctx: Math.round(ctx), isDue })
+  tick($, gen)
+}
+
+function tick($: Dollar, gen: number): void {
+  void $.clock.after(1000, async () => {
+    if (gen !== countGen || !bandNow || bandNow.isPaused) return
+    if (bandNow.left > 1) {
+      await setBand($, { ...bandNow, left: bandNow.left - 1 })
+      tick($, gen)
+    } else {
+      await handoffNow($)
+    }
+  })
+}
+
+// «Передать» или конец отсчёта; held — сообщения пользователя, набранные при полосе
+async function handoffNow($: Dollar, held: string[] = []): Promise<void> {
+  const b = bandNow
+  if (!b) return
+  countGen += 1
+  await setBand($, null)
+  // Не ждём: из хука prompt.submit команда записи ждала бы ход, который этот хук держит
+  if (!mark.pending && !mark.isOff) void startHandoff($, held, b.ctx)
+}
+
+async function pauseCountdown($: Dollar): Promise<void> {
+  if (!bandNow) return
+  countGen += 1
+  await setBand($, { ...bandNow, isPaused: true })
+}
+
+// «Отменить» — снова не раньше +askStep; isQuiet — полосу убрал новый ход, это не отказ
+async function cancelCountdown($: Dollar, isQuiet = false): Promise<void> {
+  const b = bandNow
+  if (!b) return
+  countGen += 1
+  await setBand($, null)
+  if (isQuiet) return
+  mark = { ...mark, quietBelow: b.ctx + askStep, askAt: Math.max(mark.askAt, b.ctx + askStep) }
+  await save($)
+}
+
+async function isAgentBusy($: Dollar): Promise<boolean> {
+  return (await $.agent.list()).some(a => a.status === 'pending' || a.status === 'running' || a.status === 'waiting')
+}
+
+// Конец хода основного цикла: удачный момент или верхний порог — полоса с отсчётом
+async function afterTurn($: Dollar, isAborted: boolean): Promise<void> {
+  if (!isInteractive || isAborted || mark.pending || mark.isOff || !mark.isArmed || bandNow || isChecking || isIdleChecking) return
+  const ctx = await contextK($)
+  if (ctx < from || ctx < mark.quietBelow) return
+  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return
+  const isDue = ctx >= to && ctx >= mark.askAt
+  if (!isDue) {
+    if (ctx < mark.checkedAt + RECHECK_STEP) return
+    isIdleChecking = true
+    let reply: string | null = null
+    try {
+      reply = await forkAnswer($, IDLE_PROMPT.replace('{ctx}', String(Math.round(ctx))))
+    } catch {
+      reply = null
+    } finally {
+      isIdleChecking = false
+    }
+    if (reply === null || !/^[\s*]*ДА(?![а-яё])/i.test(reply)) {
+      mark = { ...mark, checkedAt: ctx }
+      await save($)
+      return
+    }
   }
+  // Пока шла проверка, пользователь написал или начался другой ход — момент уже не тот
+  if (isTurnRunning || isChecking || mark.pending || bandNow) return
+  await startCountdown($, ctx, isDue)
 }
 
 // $.model.fork без своего предела времени: не дольше FORK_MS, иначе — «не сейчас»
@@ -296,9 +394,10 @@ async function isGoodMoment($: Dollar, ctx: number, text: string): Promise<boole
   const last = mark.lastTurn
   if (!last || last.isAborted || last.wrap === 'ask') return false
   if (ctx < mark.checkedAt + RECHECK_STEP) return false
+  // «Отменить» на полосе действует и на передачу по сообщению
+  if (ctx < mark.quietBelow) return false
   if ((await recentTimes($)).length >= perHour) return false
-  const busy = (await $.agent.list()).some(a => a.status === 'pending' || a.status === 'running' || a.status === 'waiting')
-  if (busy) return false
+  if (await isAgentBusy($)) return false
   const prompt = CHECK_PROMPT.replace('{ctx}', String(Math.round(ctx))).replace('{text}', () => text)
   const reply = await forkAnswer($, prompt)
   const isYes = reply !== null && /^[\s*]*ДА(?![а-яё])/i.test(reply)
@@ -327,7 +426,7 @@ async function commandText($: Dollar, raw: string): Promise<string> {
     : mark.pending
       ? `идёт передача: ${mark.pending.path}`
       : mark.isArmed
-        ? `ждёт момента: ${from}–${to} тыс. токенов — в конце задачи, с ${to} тыс. — вопрос`
+        ? `ждёт момента: ${from}–${to} тыс. токенов — в конце задачи, с ${to} тыс. — в конце хода без проверки; перед передачей отсчёт ${countdown} с`
         : `ждёт, пока контекст опустится ниже ${mark.armBelow} тыс. токенов`
   const times = (await recentTimes($)).length
   const origin = lastOrigin ? ` Последнее сообщение пользователя пришло как «${lastOrigin}».` : ''
@@ -383,6 +482,9 @@ async function loadMark($: Dollar): Promise<void> {
 
 async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
   turnWrap = 'none'
+  isTurnRunning = true
+  // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода
+  await cancelCountdown($, true)
   // Команда передачи стоит в очереди: первый ход основного цикла после её начала — ход записи документа
   const p = mark.pending
   if (p && !p.writeTurnId) {
@@ -392,17 +494,31 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
 }
 
 async function noteTurnEnd($: Dollar, isAborted: boolean, turnId: string): Promise<void> {
+  isTurnRunning = false
   mark = { ...mark, lastTurn: { isAborted, wrap: turnWrap } }
   await save($)
   await checkPending($, turnId)
+  void afterTurn($, isAborted)
 }
 
 async function onMeasure($: Dollar, ctx: number): Promise<void> {
   if (ctx < mark.armBelow && !mark.pending && !mark.isArmed) {
-    mark = { ...mark, isArmed: true, askAt: to, checkedAt: 0, armBelow: from }
+    mark = { ...mark, isArmed: true, askAt: to, checkedAt: 0, quietBelow: 0, armBelow: from }
     await save($)
   }
-  if (ctx >= to && ctx >= mark.askAt) void offerHandoff($, ctx)
+}
+
+// Пользователь написал при полосе — момент уже проверен: передаём с его сообщением
+async function submitDuringBand($: Dollar, text: string): Promise<string | null> {
+  const b = bandNow
+  if (!b) return null
+  // Ответ на вопрос итогового окна — в этой же сессии; полосу снова покажет конец следующего хода
+  if (!b.isDue && mark.lastTurn?.wrap === 'ask') {
+    await cancelCountdown($, true)
+    return null
+  }
+  await handoffNow($, [text])
+  return `Контекст ${b.ctx} тыс. токенов: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само.`
 }
 
 export const register: Register = (on, options) => {
@@ -411,9 +527,11 @@ export const register: Register = (on, options) => {
   global = limits(options, 'global', { from: 150, to: 200, askStep: 30 })
   ;({ from, to, askStep } = usual)
   perHour = num(options.perHour, 2)
+  countdown = Math.max(1, Math.round(num(options.countdown, 5)))
   mark = freshMark()
 
   on('session.start', async ($, e, next) => {
+    isInteractive = !!e.isInteractive
     if (e.isInteractive) {
       await $.command.register({
         name: 'autohandoff',
@@ -428,6 +546,8 @@ export const register: Register = (on, options) => {
     }
     await chooseLimits($, e.cwd ?? '')
     await loadMark($)
+    // Перезагрузка плагина: atom полосы живёт дольше переменных модуля — без этого полоса висела бы с мёртвыми кнопками
+    await setBand($, null)
     return next(e)
   })
 
@@ -469,6 +589,16 @@ export const register: Register = (on, options) => {
       return { drop: 'Сообщение принято и уйдёт следом за предыдущим.' }
     }
 
+    // Полоса с отсчётом: сообщение с вложением или @путь не придерживаем — полосу снимаем, оно идёт как обычно
+    if (bandNow) {
+      if (e.attachments?.length || MENTION.test(e.text)) {
+        await cancelCountdown($, true)
+        return next(e)
+      }
+      const reason = await submitDuringBand($, e.text)
+      return reason === null ? next(e) : { drop: reason }
+    }
+
     // Не придерживаем: выключено, ждёт спада контекста, набрано посреди хода, вложения, упоминания файлов
     if (mark.isOff || !mark.isArmed || isChecking || e.turnId || e.attachments?.length || MENTION.test(e.text)) {
       return next(e)
@@ -480,5 +610,30 @@ export const register: Register = (on, options) => {
   on('session.measure', async ($, e, next) => {
     await onMeasure($, (e.context?.tokens ?? 0) / 1000)
     return next(e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const b = await read($, band)
+    if (!b || e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const text = b.isPaused
+      ? `Передача в чистый контекст на паузе (контекст ${b.ctx} тыс. токенов). Дочитайте и нажмите «Передать».`
+      : `Контекст ${b.ctx} тыс. токенов, задача закончена: через ${b.left} с передам работу в чистый контекст.`
+    return (
+      <Box flexDirection="row" gap={1} alignItems="center">
+        <Text>{text}</Text>
+        {b.isPaused ? null : (
+          <Button key="pause" variant="primary" onPress={() => void pauseCountdown($)}>
+            Пауза
+          </Button>
+        )}
+        <Button key="go" variant={b.isPaused ? 'primary' : 'secondary'} onPress={() => void handoffNow($)}>
+          Передать
+        </Button>
+        <Button key="cancel" variant="secondary" onPress={() => void cancelCountdown($)}>
+          Отменить
+        </Button>
+      </Box>
+    )
   })
 }

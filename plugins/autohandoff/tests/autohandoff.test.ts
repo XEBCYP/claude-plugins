@@ -17,8 +17,12 @@ type Env = {
   toasts?: string[]
 }
 
+// Часы теста: finishTask даёт договорить проверке в конце хода
+let clockRef: any = null
+
 function engine(on: any, env: Env) {
   const clock = mock.clock(on, { now: 1_000_000 })
+  clockRef = clock
   mock.store(on)
   mock.env(on, { USERPROFILE: 'C:\\Users\\tester' })
   on('command.register', () => ({ value: { command: 'autohandoff' } }))
@@ -78,7 +82,15 @@ async function finishTask($: any, turnId: string, ask?: string): Promise<void> {
   await $.turn.start({ text: 'сделай задачу', turnId })
   await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Готово.', ...(ask ? { ask } : {}) })
   await $.turn.complete({ answer: 'Готово.', durationMs: 1000, isAborted: false, reason: 'answer', turnId } as never)
+  await clockRef.settle()
 }
+
+const BAND = {
+  plugin: 'autohandoff',
+  component: 'AbovePrompt',
+  surface: 'desktop',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80 },
+} as const
 
 function userPrompt(text: string) {
   return { text, wait: false, origin: { kind: 'sdk' } }
@@ -118,7 +130,7 @@ test('удачный момент: сообщение придержано, до
   expect(env.submits[2]).toBe('И ещё вот это')
 })
 
-test('итоговое окно задало вопрос — сообщение не придерживается и проверка не идёт', async ($, on) => {
+test('итоговое окно задало вопрос, пользователь ответил при полосе — ответ идёт в эту же сессию', async ($, on) => {
   const env = fresh()
   engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
@@ -126,7 +138,6 @@ test('итоговое окно задало вопрос — сообщение
 
   const r = await $.prompt.submit(userPrompt('да') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
-  expect(env.forks).toBe(0)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
 
@@ -205,7 +216,7 @@ test('сообщение с упоминанием файла (@путь) не �
   await finishTask($, 't1')
   const r = await $.prompt.submit(userPrompt('посмотри @docs/plan.md') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
-  expect(env.forks).toBe(0)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
 
 test('лимит в час считает и неудачные попытки', async ($, on) => {
@@ -222,28 +233,108 @@ test('лимит в час считает и неудачные попытки',
     await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: `w${i}` } as never)
     await clock.settle()
   }
-  expect(env.forks).toBe(2)
+  expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(2)
+  const forks = env.forks
   env.k = 245
   await finishTask($, 'a3')
   const r = await $.prompt.submit(userPrompt('задача 3') as never)
   expect('drop' in r && r.drop !== undefined).toBe(false)
-  expect(env.forks).toBe(2)
+  expect(env.forks).toBe(forks)
+  expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(2)
 })
 
-test('с 250 тыс. — вопрос; «Не сейчас» — снова только через +50 тыс.', async ($, on) => {
+test('пользователь отошёл: в конце задачи полоса, через 5 с — передача без его сообщения', async ($, on) => {
   const env = fresh()
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1', 'Закоммитить?')
+  expect(env.forks).toBe(1)
+  const ui = await $.ui.mount(BAND)
+
+  await clock.advance(4000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await clock.advance(1500)
+  const write = env.commands.find(c => c.startsWith('autohandoff:write')) ?? ''
+  expect(write).toContain('итог последней задачи')
+  const path = /Сохрани документ в файл (\S+?)\.(\s|$)/.exec(write)?.[1] ?? ''
+
+  await $.turn.start({ text: '', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: path, durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.commands).toContain('clear')
+  expect(env.submits.length).toBe(1)
+  expect(env.submits[0]).toContain('пересказа')
+  expect(env.submits[0]).toContain('AskUserQuestion')
+  await ui.unmount()
+})
+
+test('«Пауза» — отсчёт стоит, ничего не передаётся; «Передать» — передача', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'pause' })
+  await clock.advance(60_000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await ui.press({ key: 'go' })
+  await clock.settle()
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+  await ui.unmount()
+})
+
+test('«Отменить» — полосы нет до +50 тыс.; с 250 тыс. — полоса в конце хода без проверки момента', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  // Посреди хода порог пройден — ни вопроса, ни передачи
   await measure($, 260)
   await clock.settle()
-  expect(env.asks).toBe(1)
-  await measure($, 300)
-  await clock.settle()
-  expect(env.asks).toBe(1)
-  env.answer = 'Передать'
-  await measure($, 315)
-  await clock.settle()
-  expect(env.asks).toBe(2)
+  expect(env.asks).toBe(0)
+
+  await finishTask($, 't1')
+  expect(env.forks).toBe(0)
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'cancel' })
+  await clock.advance(10_000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+
+  env.k = 300
+  await finishTask($, 't2')
+  await clock.advance(10_000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+
+  env.k = 315
+  await finishTask($, 't3')
+  await clock.advance(6000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+  expect(env.asks).toBe(0)
+  await ui.unmount()
+})
+
+test('«Отменить», потом сообщение — передачи нет, сообщение идёт в эту же сессию', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'cancel' })
+  const r = await $.prompt.submit(userPrompt('а ещё вот что') as never)
+  expect('drop' in r && r.drop !== undefined).toBe(false)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await ui.unmount()
+})
+
+test('отсчёт из настроек: countdown 30', { options: { countdown: 30 } }, async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  await clock.advance(20_000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await clock.advance(11_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
 })
 
@@ -292,30 +383,34 @@ test('проверка зависла — через 30 с сообщение у
   await clock.settle()
 })
 
-test('глобальная сессия (в папке реестр подпроектов) — свои пороги: 150 тыс. и вопрос с 200 тыс.', async ($, on) => {
+test('глобальная сессия (в папке реестр подпроектов) — свои пороги: 150 тыс. и без проверки с 200 тыс.', async ($, on) => {
   const env = fresh()
   env.globalCwd = 'C:/Projects/Global'
   env.k = 160
   const clock = engine(on, env)
   await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true } as never)
-  await measure($, 195)
-  await clock.settle()
-  expect(env.asks).toBe(0)
-  await measure($, 205)
-  await clock.settle()
-  expect(env.asks).toBe(1)
-  // «Не сейчас» — снова через +30 тыс.
-  await measure($, 230)
-  await clock.settle()
-  expect(env.asks).toBe(1)
-  await measure($, 236)
-  await clock.settle()
-  expect(env.asks).toBe(2)
-
+  // 160 тыс.: проверка момента идёт
   await finishTask($, 't1')
-  await $.prompt.submit(userPrompt('дальше') as never)
   expect(env.forks).toBe(1)
-  await clock.settle()
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'cancel' })
+
+  // 205 тыс.: верхний порог глобальной, но «Отменить» на 160 держит до 190 — уже прошло: полоса без проверки
+  env.k = 205
+  await finishTask($, 't2')
+  expect(env.forks).toBe(1)
+  await ui.press({ key: 'cancel' })
+  // «Отменить» — снова через +30 тыс.
+  env.k = 230
+  await finishTask($, 't3')
+  await clock.advance(6000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  env.k = 236
+  await finishTask($, 't4')
+  await clock.advance(6000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+  expect(env.forks).toBe(1)
+  await ui.unmount()
 })
 
 test('глобальная сессия на 140 тыс. — ещё рано: новая сессия входит в работу на 90–120 тыс.', async ($, on) => {
