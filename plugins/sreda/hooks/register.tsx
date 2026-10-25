@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
+import { MEASURE_MS, measure, resetStroka } from './stroka'
 import { registerUroven, startUroven, urovenCall } from './uroven'
 
 // Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json, с кнопками. Вопрос
@@ -291,10 +292,24 @@ export const register: Register = on => {
       isDeferred: true,
     })
     answeredTool = reg.tool
+    resetStroka()
     await startUroven($)
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
+    void measure($)
+    $.clock.every(MEASURE_MS, () => void measure($))
     void $.ui.open({ id: PANE, title: 'Ждут ответа' })
+    return next(e)
+  })
+
+  // Строка под полем ввода: токены и лимиты — после каждого ответа и когда движок пересчитал расход
+  on('turn.complete', async ($, e, next) => {
+    // Ход агента — не ответ сессии: цифры переписки от него не меняются
+    if (e.agentId === undefined) void measure($)
+    return next(e)
+  })
+  on('session.measure', async ($, e, next) => {
+    void measure($)
     return next(e)
   })
 

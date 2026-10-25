@@ -62,7 +62,7 @@ test('много вопросов и поиск ошибки — высокий 
   await step($)
 
   expect(env.efforts).toEqual(['high', 'low'])
-  expect(env.status.at(-1)).toBe('Усилия: низкий')
+  expect(env.status.at(-1)?.startsWith('Усилия: низкий · TKN ')).toBe(true)
 })
 
 test('короткое «да» посреди работы уровень не меняет', async ($, on) => {

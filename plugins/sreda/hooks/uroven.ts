@@ -7,6 +7,8 @@
 // понижение — только пока переписка короткая. Модель сессии не меняется никогда: кэш привязан к модели.
 // Агенты и подпроекты: модель и уровень выправляются в рамки на вызове инструмента; слепая проверка — Opus высокий.
 
+import { showEffort } from './stroka'
+
 export type Level = 'low' | 'medium' | 'high'
 
 const NAMES: Record<Level, string> = { low: 'низкий', medium: 'средний', high: 'высокий' }
@@ -69,11 +71,12 @@ async function context($: any): Promise<number> {
   }
 }
 
+// Своя часть строки под полем ввода — первой; токены и лимиты дописывает hooks/stroka.ts
 function show($: any): void {
   const text = `Усилия: ${NAMES[level]}`
   if (text === shown) return
   shown = text
-  $.ui.status(text)
+  void showEffort($, text)
 }
 
 function set($: any, next: Level): string {
