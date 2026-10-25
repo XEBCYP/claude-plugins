@@ -5,8 +5,15 @@ export type Pending = {
   question: string
   why?: string
   options: Option[]
+  // Можно выбрать несколько вариантов (окно с multiSelect): кнопки панели — флажки, ответ — кнопкой «Ответить»
+  multi?: true
+  // Команда, которую пользователь запускает сам (блок ``` в тексте вопроса или в preview варианта): панель
+  // показывает её отдельной рамкой с кнопкой «Скопировать команду»
+  command?: string
   status?: 'open' | 'answered'
   answer?: string
+  // Отмеченные варианты вопроса с несколькими ответами — окну они уходят списком, как из самого окна
+  picked?: string[]
   asked?: string
   answeredAt?: string
   // Сессия, в которой открыто окно вопроса (вопрос записал сам плагин)
@@ -17,6 +24,7 @@ export type Pending = {
 
 declare module 'claude-code' {
   interface PluginState {
-    sreda: { items: Pending[] }
+    // picked — отмеченные в панели флажки: id вопроса → варианты
+    sreda: { items: Pending[]; picked: Record<string, string[]> }
   }
 }

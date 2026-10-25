@@ -26,6 +26,8 @@ type Env = {
   submits: string[]
   // Ответ окна; null — окно висит, пока на него не ответят из панели
   dialog: string | null
+  // Ответ окна с несколькими вариантами — списком, как его отдаёт само окно
+  dialogMany?: string[]
   // Окно ещё не нарисовано, пока тест не отпустит
   gate?: Promise<void>
 }
@@ -57,6 +59,9 @@ function engine(on: any, env: Env) {
     if (e.tool !== 'AskUserQuestion') return { result: 'ran' }
     if (env.gate) await env.gate
     if (env.dialog === null) await new Promise(() => {})
+    if (Array.isArray(env.dialogMany)) {
+      return { result: { questions: e.questions, answers: { [e.questions[0].question]: env.dialogMany } } }
+    }
     return { result: { questions: e.questions, answers: { [e.questions[0].question]: env.dialog } } }
   })
   return clock
@@ -270,4 +275,185 @@ test('свой ответ набран и не теряется при опро�
   expect(r.result.answers[Q]).toBe('Слить, но после')
   expect(env.submits).toEqual([])
   await ui.unmount()
+})
+
+const QM = 'Что ставить?'
+
+function askMany($: any) {
+  return $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: QM,
+      header: 'Установка',
+      multiSelect: true,
+      options: [{ label: 'Базы' }, { label: 'Агент' }, { label: 'Экран' }],
+    }],
+  })
+}
+
+test('несколько ответов: кнопки — флажки, окно получает отмеченные списком в порядке вариантов', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = askMany($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  expect(it.multi).toBe(true)
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:2` })
+  await ui.press({ key: `${it.id}:0` })
+  await ui.press({ key: `${it.id}:1` })
+  await ui.press({ key: `${it.id}:1` })
+  // Нажатие только отмечает — вопрос ещё открыт
+  expect(list(env, MAIN).length).toBe(1)
+  await ui.press({ key: `${it.id}:send` })
+  const r = await pending
+
+  // Окну — строкой через запятую, как в схеме ответа; в архиве — и текст, и список
+  expect(r.result.answers[QM]).toBe('Базы, Экран')
+  const [done] = list(env, ARCHIVE)
+  expect(done.answer).toBe('Базы, Экран')
+  expect(done.picked).toEqual(['Базы', 'Экран'])
+  expect(env.submits).toEqual([])
+  await ui.unmount()
+})
+
+test('несколько ответов: свой вариант добавляется к отмеченным, пустой ответ не уходит', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = askMany($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:send` })
+  expect(list(env, MAIN).length).toBe(1)
+
+  await ui.press({ key: `${it.id}:1` })
+  await $.ui.input({ plugin: 'sreda', key: `${it.id}:own`, text: 'Ещё отчёты' })
+  const r = await pending
+
+  expect(r.result.answers[QM]).toBe('Агент, Ещё отчёты')
+  await ui.unmount()
+})
+
+test('несколько ответов кнопкой в другой сессии — окно получает список', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const pending: Promise<any> = askMany($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  env.files[MAIN] = JSON.stringify({ items: [] })
+  env.files[ARCHIVE] = JSON.stringify({
+    items: [{ ...it, status: 'answered', answer: 'Агент, Экран', picked: ['Агент', 'Экран'], answeredIn: 'sess-2' }],
+  })
+  await clock.advance(1500)
+  const r = await pending
+
+  expect(r.result.answers[QM]).toBe('Агент, Экран')
+})
+
+test('несколько ответов в окне — в архив уходит текст и список', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'x', dialogMany: ['Базы', 'Агент'] }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  await askMany($)
+
+  expect(list(env, MAIN)).toEqual([])
+  const [done] = list(env, ARCHIVE)
+  expect(done.answer).toBe('Базы, Агент')
+  expect(done.picked).toEqual(['Базы', 'Агент'])
+})
+
+test('команда для пользователя из preview — в панели рамка и кнопка «Скопировать команду»', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  engine(on, env)
+  const copied: string[] = []
+  const toasts: string[] = []
+  on('ui.copy', (_: unknown, e: { text: string }) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  on('ui.toast', (_: unknown, e: any) => {
+    toasts.push(String(e.text ?? e))
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const cmd = 'powershell -ExecutionPolicy Bypass -File "C:\Data\install.ps1"'
+  void $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: 'Запустите установку: Win+X → «Терминал (администратор)», вставьте команду, Enter.',
+      header: 'Установка',
+      multiSelect: false,
+      options: [
+        { label: 'Запустил, проверь', description: 'Проверю', preview: '```powershell\n' + cmd + '\n```' },
+        { label: 'Позже', description: 'Напомню' },
+      ],
+    }],
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  expect(it.command).toBe(cmd)
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${it.id}:copy` })
+  expect(copied).toEqual([cmd])
+  expect(toasts.length).toBe(1)
+  // Копирование на вопрос не отвечает
+  expect(list(env, MAIN).length).toBe(1)
+  await ui.unmount()
+})
+
+test('команда в тексте вопроса — тоже в рамку; блок другого языка в preview — не команда', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  void $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [
+      {
+        question: 'Обычный PowerShell (Win+X → «Терминал»):\n```powershell\nGet-Service Flower*\n```',
+        header: 'Проверка',
+        multiSelect: false,
+        options: [{ label: 'Запустил, проверь' }, { label: 'Позже' }],
+      },
+      {
+        question: 'Какой вариант кода взять?',
+        header: 'Код',
+        multiSelect: false,
+        options: [
+          { label: 'А', preview: '```ts\nconst a = 1\n```' },
+          { label: 'Б', preview: '```ts\nconst b = 2\n```' },
+        ],
+      },
+    ],
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [first, second] = list(env, MAIN)
+  expect(first.command).toBe('Get-Service Flower*')
+  expect(second.command).toBeUndefined()
+})
+
+test('тот же вопрос уже в панели — флажки и команда берутся из окна', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  env.files[MAIN] = JSON.stringify({
+    items: [{ id: 'q1', from: 'Demo', question: QM, options: [{ label: 'Базы' }], status: 'open' }],
+  })
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  void askMany($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  expect(it.id).toBe('q1')
+  expect(it.multi).toBe(true)
 })
