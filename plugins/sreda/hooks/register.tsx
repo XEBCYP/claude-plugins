@@ -191,6 +191,36 @@ function commandOf(q: Question): string | undefined {
   return undefined
 }
 
+// Пользователь отправил сообщение, не ответив: приложение закрывает окно и вместо ответа даёт заглушку «[User did not
+// answer this question — they sent a message instead. Treat that message as their response; do not re-ask.]». Это не
+// ответ: вопрос остаётся в панели, а Claude получает вместо заглушки notAnswered — задать вопрос снова в конце хода.
+const SKIPPED = /did not answer this question|sent a message instead/i
+const isSkipped = (answer: Answer | undefined) =>
+  answer !== undefined && SKIPPED.test(Array.isArray(answer) ? answer.join(' ') : answer)
+function notAnswered(tool: string): string {
+  return (
+    '[Не отвечено: пользователь отправил сообщение, не нажав кнопку окна. Вопрос остаётся в панели «Ждут ответа». ' +
+    'Если его сообщение явно отвечает на этот вопрос или отказывается отвечать («не сейчас», «не отвечу»), — ' +
+    `инструмент ${tool} с этим ответом. Иначе сообщение — новое задание, а не ответ: выполните его, а в конце хода ` +
+    'задайте этот вопрос окном AskUserQuestion снова, теми же словами.]'
+  )
+}
+
+async function markMissed($: any, ids: string[]): Promise<void> {
+  const list = await load($)
+  const when = new Date().toISOString()
+  let changed = false
+  for (const it of list) {
+    if (ids.includes(it.id)) {
+      it.missed = when
+      changed = true
+    }
+  }
+  if (!changed) return
+  await save($, list)
+  await update($, items, () => list)
+}
+
 async function copyCommand($: any, it: Pending, surface: unknown): Promise<void> {
   const r = await $.ui.copy({ text: it.command, surface })
   $.ui.toast(r.isCopied ? 'Команда скопирована — вставьте её Ctrl+V' : `Не скопировалось: ${r.reason ?? 'причина неизвестна'}`)
@@ -207,6 +237,8 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
     const same = list.find(one => one.question === q.question)
     if (same) {
       same.session = mine
+      // Окно снова открыто — пометка «окно закрылось без ответа» больше не верна
+      delete same.missed
       // Вид вопроса — по окну, а не по прежней записи: флажки и команда появляются и у такого вопроса
       if (q.multiSelect) same.multi = true
       else delete same.multi
@@ -317,11 +349,26 @@ export const register: Register = on => {
       const got = r.deny === undefined && !r.isError
         ? ((r.result as { answers?: Record<string, Answer> })?.answers ?? {})
         : {}
+      const missed: string[] = []
+      const told: Record<string, Answer> = { ...got }
       for (const [k, id] of ids.entries()) {
-        const answer = got[questions[k].question]
-        if (answer && answer.length > 0) await archive($, id, answer)
+        const q = questions[k].question
+        const answer = got[q]
+        if (!isSkipped(answer)) {
+          if (answer && answer.length > 0) await archive($, id, answer)
+          continue
+        }
+        // Часть вопросов успели ответить кнопкой панели (она уже унесла их в архив) — это ответ, а не пропуск
+        if (answers[q] !== undefined) told[q] = answers[q]
+        else {
+          missed.push(id)
+          told[q] = notAnswered(answeredTool)
+        }
       }
-      return r
+      if (Object.keys(got).every(q => told[q] === got[q])) return r
+      if (missed.length > 0) await markMissed($, missed)
+      // Свой { result } без ref ядра: с ref ядро взяло бы свой текст результата — с заглушкой «do not re-ask»
+      return { result: { ...(r.result as object), answers: told }, ...(r.context ? { context: r.context } : {}) } as never
     } finally {
       ids.forEach(id => waiting.delete(id))
     }
@@ -340,6 +387,9 @@ export const register: Register = on => {
           <Box key={it.id} flexDirection="column" gap={1} borderStyle="round" padding={1}>
             <Text dimColor>{it.from}</Text>
             <Text bold>{it.question}</Text>
+            {it.missed ? (
+              <Text color="warning">Окно в сессии закрылось вашим сообщением, ответа не было — вопрос ждёт здесь.</Text>
+            ) : null}
             {it.why ? <Text>{it.why}</Text> : null}
             {it.command ? (
               <Box flexDirection="column" gap={1} borderStyle="round" padding={1}>
