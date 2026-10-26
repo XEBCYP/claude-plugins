@@ -139,13 +139,18 @@ test('окно закрыто сообщением без ответа — во�
   await ui.unmount()
 
   // Claude задаёт вопрос снова теми же словами — та же запись, без дубля и без пометки
-  env.dialog = null
-  void ask($)
+  // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
+  let release = () => {}
+  env.gate = new Promise<void>(r => (release = r))
+  env.dialog = 'Да'
+  const call = ask($)
   await new Promise(resolve => setTimeout(resolve, 0))
   const again = list(env, MAIN)
   expect(again.length).toBe(1)
   expect(again[0].id).toBe(it.id)
   expect(again[0].missed).toBeUndefined()
+  release()
+  await call
 })
 
 const TWO = [
@@ -582,7 +587,9 @@ test('несколько ответов в окне — в архив уходи
 })
 
 test('команда для пользователя из preview — в панели рамка и кнопка «Скопировать команду»', async ($, on) => {
-  const env: Env = { files: {}, submits: [], dialog: null }
+  // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
+  let release = () => {}
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', gate: new Promise<void>(r => (release = r)) }
   engine(on, env)
   const copied: string[] = []
   const toasts: string[] = []
@@ -597,7 +604,7 @@ test('команда для пользователя из preview — в пан�
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
 
   const cmd = 'powershell -ExecutionPolicy Bypass -File "C:\Data\install.ps1"'
-  void $.tool.call({
+  const call = $.tool.call({
     tool: 'AskUserQuestion',
     questions: [{
       question: 'Запустите установку: Win+X → «Терминал (администратор)», вставьте команду, Enter.',
@@ -620,14 +627,18 @@ test('команда для пользователя из preview — в пан�
   // Копирование на вопрос не отвечает
   expect(list(env, MAIN).length).toBe(1)
   await ui.unmount()
+  release()
+  await call
 })
 
 test('команда в тексте вопроса — тоже в рамку; блок другого языка в preview — не команда', async ($, on) => {
-  const env: Env = { files: {}, submits: [], dialog: null }
+  // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
+  let release = () => {}
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', gate: new Promise<void>(r => (release = r)) }
   engine(on, env)
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
 
-  void $.tool.call({
+  const call = $.tool.call({
     tool: 'AskUserQuestion',
     questions: [
       {
@@ -651,19 +662,91 @@ test('команда в тексте вопроса — тоже в рамку; 
   const [first, second] = list(env, MAIN)
   expect(first.command).toBe('Get-Service Flower*')
   expect(second.command).toBeUndefined()
+  release()
+  await call
+})
+
+test('команда в preview строкой без рамки — тоже команда панели', async ($, on) => {
+  // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
+  let release = () => {}
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', gate: new Promise<void>(r => (release = r)) }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const cmd = 'powershell -ExecutionPolicy Bypass -File C:\\MobileData1C7\\stage-r51\\install-r51.ps1'
+  const call = $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: 'Ставим дни рождения?',
+      header: 'Дни рождения',
+      multiSelect: false,
+      options: [
+        { label: 'Готово, проверь', preview: 'Где: сервер EM-WIN-160, обычный PowerShell\n\n' + cmd },
+        { label: 'Позже' },
+      ],
+    }],
+  } as any)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const [it] = list(env, MAIN)
+  expect(it.command).toBe(cmd)
+  release()
+  await call
+})
+
+test('окно «Запустил» без команды в рамке — не показано, Claude получает правило', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', asked: [] }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+
+  const r = await outcome($.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: 'Ставим дни рождения?',
+      header: 'Дни рождения',
+      multiSelect: false,
+      options: [
+        { label: 'Запустил, проверь', preview: 'Где: EM-WIN-160\n\npowershell -File C:\\x\\install.ps1' },
+        { label: 'Позже' },
+      ],
+    }],
+  } as any))
+  expect(String(r.deny)).toContain('```powershell')
+  expect(env.opened ?? 0).toBe(0)
+  expect(list(env, MAIN).length).toBe(0)
+
+  // «Не запустил», «Сервер запустился» — обычный вопрос, окно показывается; строка-пояснение — не команда
+  const ok: any = await $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: 'Flower поднялся?',
+      header: 'Проверка',
+      multiSelect: false,
+      options: [
+        { label: 'Сервер запустился', preview: 'PowerShell 7 уже стоит, ничего ставить не нужно' },
+        { label: 'Не запустил' },
+      ],
+    }],
+  } as any)
+  expect(ok.deny).toBeUndefined()
+  expect(env.opened).toBe(1)
+  expect(list(env, ARCHIVE)[0].command).toBeUndefined()
 })
 
 test('тот же вопрос уже в панели — флажки и команда берутся из окна', async ($, on) => {
-  const env: Env = { files: {}, submits: [], dialog: null }
+  // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
+  let release = () => {}
+  const env: Env = { files: {}, submits: [], dialog: 'Базы', gate: new Promise<void>(r => (release = r)) }
   env.files[MAIN] = JSON.stringify({
     items: [{ id: 'q1', from: 'Demo', question: QM, options: [{ label: 'Базы' }], status: 'open' }],
   })
   engine(on, env)
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
 
-  void askMany($)
+  const call = askMany($)
   await new Promise(resolve => setTimeout(resolve, 0))
   const [it] = list(env, MAIN)
   expect(it.id).toBe('q1')
   expect(it.multi).toBe(true)
+  release()
+  await call
 })
