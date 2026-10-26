@@ -301,6 +301,10 @@ function missingCommand(questions: Question[]): string | undefined {
 // (вставки движка посреди хода — текст навыка, сообщение плагина — тоже его конец: один лишний повтор команды, не цикл).
 // Сообщения с вызовом в журнале нет (движок не успел записать) — не проверяем: лучше пропустить окно, чем отказывать
 // ему без конца. Окно субагента — по журналу субагента.
+// Журнал — в форме API: текст перед вызовом инструмента движок хранит блоком thinking (подпись «narration»), а поле
+// text строк $.session.messages() собирает только блоки text — 26.10 окно с командой в чате получило отказ. Настоящие
+// рассуждения в журнале пустые, так что команда из них не засчитается.
+type Block = { type: string; text?: string; thinking?: string; id?: string }
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 async function missingInChat($: any, questions: Question[], toolUseId?: string, agentId?: string): Promise<string | undefined> {
   const wanted = questions
@@ -308,23 +312,25 @@ async function missingInChat($: any, questions: Question[], toolUseId?: string, 
     .map(q => ({ q, command: fencedOf(q) }))
     .filter((one): one is { q: Question; command: string } => !!one.command)
   if (wanted.length === 0 || !toolUseId) return undefined
-  let rows: { role: string; text: string; toolUses?: { tool_use_id: string }[]; toolResults?: unknown[] }[]
+  let rows: { role: string; content: Block[] | string }[]
   try {
-    rows = await $.session.messages(agentId ? { agentId } : undefined)
+    rows = await $.session.messages(agentId ? { agentId, as: 'api' } : { as: 'api' })
   } catch {
     return undefined
   }
   if (!Array.isArray(rows)) return undefined
-  const at = rows.findLastIndex(m => m.role === 'assistant' && (m.toolUses ?? []).some(t => t.tool_use_id === toolUseId))
+  const partsOf = (m: { content: Block[] | string }): Block[] =>
+    typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : []
+  const at = rows.findLastIndex(m => m.role === 'assistant' && partsOf(m).some(b => b.type === 'tool_use' && b.id === toolUseId))
   if (at < 0) return undefined
   let said = ''
   for (let i = at; i >= 0; i--) {
     const m = rows[i]
-    if (m.role === 'user' && !m.toolResults?.length) break
-    if (m.role === 'assistant') said = m.text + '\n' + said
+    if (m.role === 'user' && !partsOf(m).some(b => b.type === 'tool_result')) break
+    if (m.role === 'assistant') said = partsOf(m).map(b => (b.type === 'text' ? b.text : b.type === 'thinking' ? b.thinking : '') ?? '').join('\n') + '\n' + said
   }
-  const blocks = [...said.matchAll(new RegExp(FENCE.source, 'gi'))].map(found => flat(found[1]))
-  const lost = wanted.find(one => !blocks.includes(flat(one.command)))
+  const fenced = [...said.matchAll(new RegExp(FENCE.source, 'gi'))].map(found => flat(found[1]))
+  const lost = wanted.find(one => !fenced.includes(flat(one.command)))
   if (!lost) return undefined
   return (
     `Окно не показано: команды из вопроса «${lost.q.question.slice(0, 80)}» нет блоком в вашем сообщении этого хода. ` +

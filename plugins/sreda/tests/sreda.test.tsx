@@ -50,7 +50,18 @@ type Env = {
   messagesFail?: boolean
 }
 
-type Row = { role: string; text: string; toolUses?: { tool_use_id: string }[]; toolResults?: unknown[] }
+// thinking — текст перед вызовом инструмента: движок хранит его блоком thinking, в поле text строк его нет
+type Row = { role: string; text: string; thinking?: string; toolUses?: { tool_use_id: string }[]; toolResults?: { tool_use_id: string }[] }
+// Строка журнала в форме API ({ as: 'api' }): блоки по порядку
+const api = (m: Row) => ({
+  role: m.role,
+  content: [
+    ...(m.thinking ? [{ type: 'thinking', thinking: m.thinking, signature: 's' }] : []),
+    ...(m.text ? [{ type: 'text', text: m.text }] : []),
+    ...(m.toolUses ?? []).map(t => ({ type: 'tool_use', id: t.tool_use_id, name: 'X', input: {} })),
+    ...(m.toolResults ?? []).map(t => ({ type: 'tool_result', tool_use_id: t.tool_use_id, content: '' })),
+  ],
+})
 
 const SKIPPED =
   '[User did not answer this question — they sent a message instead. Treat that message as their response; do not re-ask.]'
@@ -77,9 +88,10 @@ function engine(on: any, env: Env) {
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
-  on('session.messages', (_: unknown, e: { agentId?: string } | undefined) => {
+  on('session.messages', (_: unknown, e: { agentId?: string; as?: string } | undefined) => {
     if (env.messagesFail) throw new Error('no transcript')
-    return { value: (e?.agentId ? env.agentMessages?.[e.agentId] : env.messages) ?? [] }
+    const rows = (e?.agentId ? env.agentMessages?.[e.agentId] : env.messages) ?? []
+    return { value: e?.as === 'api' ? rows.map(api) : rows }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     // Нет файла — пустой текст: модуль читает его как пустой список
@@ -797,6 +809,15 @@ test('окно «Запустил» с командой только в preview 
   ]
   expect(((await $.tool.call(window('tu-3'))) as any).deny).toBeUndefined()
   expect(env.opened).toBe(2)
+
+  // Текст перед окном движок хранит блоком thinking (26.10 вживую — ложный отказ): команда засчитывается
+  env.messages = [
+    { role: 'user', text: 'проверь' },
+    { role: 'assistant', text: '', thinking: block, toolUses: [{ tool_use_id: 'tu-3b' }] },
+  ]
+  expect(((await $.tool.call(window('tu-3b'))) as any).deny).toBeUndefined()
+  expect(env.opened).toBe(3)
+  env.opened = 2
 
   // Команда в тексте, но не блоком — не считается; в отказе — сама команда
   env.messages = [
