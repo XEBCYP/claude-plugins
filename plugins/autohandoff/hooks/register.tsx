@@ -18,6 +18,9 @@ import type { Band } from '../types'
 // сообщения, тот же удачный момент (вопрос в итоговом окне не мешает — он уйдёт в документ) даёт полосу над полем
 // ввода: «через `countdown` с передам» с кнопками «Пауза» (дочитать; передача — кнопкой «Передать»), «Передать», «Отменить».
 // Никто не нажал — передача. С `to` — то же в конце хода, без проверки момента; посреди хода не передаём.
+// Зато с `to` посреди хода после инструмента основного цикла Claude читает напоминание: довести шаг, записать
+// сделанное и закончить ход (не чаще чем через `askStep`). 25–26.10 один ход доходил до 200–330 действий, и контекст рос
+// со 100 до 570 тыс.: передача ждала конца хода, а он не наступал.
 // Конец хода — только там, где за сессией стоит человек: терминал (isInteractive) или приложение Claude. Сессия
 // приложения стартует с isInteractive false, как -p и SDK, и отличается от них переменной CLAUDE_CODE_ENTRYPOINT.
 // «Отменить» — снова не раньше +`askStep` (50 тыс., в глобальной — `globalAskStep`, 30 тыс.). Последний ответ
@@ -109,6 +112,12 @@ const IDLE_PROMPT = `Служебный вопрос мода автоперед
 НЕТ — во всех остальных случаях, в том числе если сомневаешься.
 Ответь одним словом: ДА или НЕТ.`
 
+const NUDGE = `Автопередача: контекст {ctx} тыс. токенов — выше порога {to} тыс., и каждое действие заново читает
+весь контекст. Передать работу в чистую сессию можно только в конце хода. Доведи текущий шаг до точки, где ничего
+не держится только в памяти разговора: запиши сделанное и что осталось (коммит — если в задаче так принято). Новых больших чтений и
+длинных логов здесь не начинай — их отдай субагенту. Затем закончи ход коротким итогом. Шаг, который нельзя прервать
+без потерь, закончи, но без лишних действий.`
+
 const band = atom({ plugin: 'autohandoff', key: 'band' } as const, null as Band | null)
 
 // Пороги из настроек мода, тыс. токенов; задаются в register, для глобальной сессии — в session.start
@@ -140,6 +149,8 @@ let countGen = 0
 // Сообщения, пришедшие, пока шла проверка момента: уходят за первым — в чистую сессию или в эту
 let queued: string[] = []
 let turnWrap: LastTurn['wrap'] = 'none'
+// С какого контекста (тыс. токенов) следующее напоминание посреди хода; новый ход — с `to`
+let nudgeAt = 0
 // Откуда пришло последнее сообщение не от плагина — для /autohandoff status
 let lastOrigin = ''
 
@@ -490,6 +501,7 @@ async function loadMark($: Dollar): Promise<void> {
 async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
   turnWrap = 'none'
   isTurnRunning = true
+  nudgeAt = 0
   // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода
   await cancelCountdown($, true)
   // Команда передачи стоит в очереди: первый ход основного цикла после её начала — ход записи документа
@@ -506,6 +518,15 @@ async function noteTurnEnd($: Dollar, isAborted: boolean, turnId: string): Promi
   await save($)
   await checkPending($, turnId)
   void afterTurn($, isAborted)
+}
+
+// Напоминание посреди хода основного цикла: с `to`, затем через каждые `askStep`; после «Отменить» — с той же высоты
+async function nudgeText($: Dollar): Promise<string | null> {
+  if (!isPersonal || !isTurnRunning || mark.pending || mark.isOff || !mark.isArmed) return null
+  const ctx = await contextK($)
+  if (ctx < to || ctx < nudgeAt || ctx < mark.quietBelow) return null
+  nudgeAt = ctx + askStep
+  return NUDGE.replace('{ctx}', String(Math.round(ctx))).replace('{to}', String(to))
 }
 
 async function onMeasure($: Dollar, ctx: number): Promise<void> {
@@ -569,6 +590,13 @@ export const register: Register = (on, options) => {
       turnWrap = typeof ask === 'string' && ask.trim() ? 'ask' : 'clean'
     }
     return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId || e.tool === WRAP_UP || r.deny !== undefined || r.isError) return r
+    const text = await nudgeText($)
+    return text ? { ...r, context: [...(r.context ?? []), text] } : r
   })
 
   on('turn.complete', async ($, e, next) => {
