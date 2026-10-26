@@ -204,12 +204,41 @@ type Question = {
 // Команда для пользователя — первый блок ```powershell (или другого языка оболочки) в тексте вопроса, затем в preview
 // вариантов (правило kak-rabotat, раздел 3). Блок другого языка — пример кода или макет, не команда.
 const FENCE = /```(?:powershell|pwsh|ps1?|cmd|bat|bash|sh|shell|console)[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/i
-function commandOf(q: Question): string | undefined {
+function fencedOf(q: Question): string | undefined {
   for (const text of [q.question, ...(q.options ?? []).map(o => o.preview ?? '')]) {
     const found = FENCE.exec(text)?.[1]?.trim()
     if (found) return found
   }
   return undefined
+}
+// Команда без рамки — строка preview, которая начинается как запуск: 26.10 глобальная сессия положила команду
+// подпроекта в preview строкой «powershell -ExecutionPolicy …», и панель показала вопрос без команды
+// Только запуск с ключом или скриптом: строка «PowerShell (администратор) …» или «powershell откроется сам» — не команда
+const BARE = /^[ \t]*((?:powershell|pwsh)(?:\.exe)?[ \t]+-\S.*|&[ \t]*["'][^"']+\.(?:ps1|cmd|bat|exe)["'].*|\.\\\S+\.(?:ps1|cmd|bat|exe)\b.*|cmd(?:\.exe)?[ \t]+\/[ck][ \t].+)$/m
+function commandOf(q: Question): string | undefined {
+  const fenced = fencedOf(q)
+  if (fenced) return fenced
+  for (const o of q.options ?? []) {
+    const found = BARE.exec(o.preview ?? '')?.[1]?.trim()
+    if (found) return found
+  }
+  return undefined
+}
+
+// Окно «запустил / не запустил» без команды в рамке: пользователю нечего копировать ни в чате, ни в панели. Такое
+// окно не показываем, а возвращаем Claude с правилом (sreda:kak-rabotat, раздел 3)
+// Подпись, которая начинается с «запустил»: «Не запустил», «Сервер запустился», «Перезапустил службу» — не то окно
+const RAN = /^[ \t]*(?:запустил[аи]?(?![а-яё])|выполнил[аи]? команду|ran it\b|I ran\b)/i
+function missingCommand(questions: Question[]): string | undefined {
+  const q = questions.find(one => (one.options ?? []).some(o => RAN.test(o.label)) && !fencedOf(one))
+  if (!q) return undefined
+  return (
+    `Окно не показано: в вопросе «${q.question.slice(0, 80)}» есть вариант «запустил», но нет команды, которую ` +
+    'пользователь скопирует. Перед окном напишите в сообщении строку «где запускать» (компьютер; обычный PowerShell ' +
+    'или администратор) и команду отдельным блоком ```powershell; в preview рекомендуемого варианта — та же команда ' +
+    'тем же блоком ```powershell (по нему панель «Ждут ответа» покажет кнопку «Скопировать команду»). Команду ' +
+    'подпроекта, если её нет целиком, сначала возьмите у подпроекта. Затем задайте окно снова.'
+  )
 }
 
 // Пользователь отправил сообщение, не ответив: приложение закрывает окно и вместо ответа даёт заглушку «[User did not
@@ -366,6 +395,9 @@ export const register: Register = on => {
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (next.origin.plugin !== 'engine') return next(e)
     const all = e.questions as Question[]
+    // До разбора ответов из панели: отказ не трогает later, и исправленный повтор окна получит их как обычно
+    const noCommand = missingCommand(all)
+    if (noCommand) return { deny: noCommand }
     // Повтор вопроса, на который пользователь уже ответил кнопкой панели, пока шёл ход: ответ сразу, без окна и без
     // новой записи в панели; в окне — только остальные вопросы
     const known: Record<string, Answer> = {}

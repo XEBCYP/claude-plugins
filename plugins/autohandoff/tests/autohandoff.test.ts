@@ -274,6 +274,9 @@ test('пользователь отошёл: в конце задачи поло
   expect(env.submits.length).toBe(1)
   expect(env.submits[0]).toContain('пересказа')
   expect(env.submits[0]).toContain('AskUserQuestion')
+  // Подпроект после передачи пишет не пользователю, а в глобальную сессию
+  expect(env.submits[0]).toContain('подпроект глобального проекта')
+  expect(env.submits[0]).toContain('в глобальную сессию')
   await ui.unmount()
 })
 
