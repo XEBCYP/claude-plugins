@@ -43,7 +43,14 @@ type Env = {
   paneOpens?: number
   // Папки: путь → имена вложенных папок (для $.fs.list)
   dirs?: Record<string, string[]>
+  // Журнал сессии для $.session.messages()
+  messages?: Row[]
+  // Журналы субагентов: agentId → строки; журнал недоступен
+  agentMessages?: Record<string, Row[]>
+  messagesFail?: boolean
 }
+
+type Row = { role: string; text: string; toolUses?: { tool_use_id: string }[]; toolResults?: unknown[] }
 
 const SKIPPED =
   '[User did not answer this question — they sent a message instead. Treat that message as their response; do not re-ask.]'
@@ -70,6 +77,10 @@ function engine(on: any, env: Env) {
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
+  on('session.messages', (_: unknown, e: { agentId?: string } | undefined) => {
+    if (env.messagesFail) throw new Error('no transcript')
+    return { value: (e?.agentId ? env.agentMessages?.[e.agentId] : env.messages) ?? [] }
+  })
   on('fs.read', (_: unknown, e: { path: string }) => {
     // Нет файла — пустой текст: модуль читает его как пустой список
     return { value: env.files[e.path.replace(/\\/g, '/')] ?? '' }
@@ -736,6 +747,91 @@ test('окно «Запустил» без команды в рамке — не
   expect(ok.deny).toBeUndefined()
   expect(env.opened).toBe(1)
   expect(list(env, ARCHIVE)[0].command).toBeUndefined()
+})
+
+test('окно «Запустил» с командой только в preview — не показано, пока команды нет в чате этого хода', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', asked: [] }
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const cmd = 'powershell -ExecutionPolicy Bypass -File C:\\Projects\\MobileData1C7\\deploy\\make-feed-key.ps1 -Move'
+  const ran = (question: string, command: string) => ({
+    question,
+    header: 'Команда',
+    multiSelect: false,
+    options: [
+      { label: 'Запустил, проверь', preview: 'Где: этот сервер, обычный PowerShell\n\n```powershell\n' + command + '\n```' },
+      { label: 'Позже' },
+    ],
+  })
+  const window = (id: string, extra: object = {}) =>
+    ({ tool: 'AskUserQuestion', tool_use_id: id, questions: [ran('R50: перенести ключ?', cmd)], ...extra }) as any
+  const block = 'Где запускать: этот сервер, обычный PowerShell.\n\n```powershell\n' + cmd + '\n```'
+
+  // Команда была в прошлом ходе, до сообщения пользователя, — не считается
+  env.messages = [
+    { role: 'assistant', text: block, toolUses: [] },
+    { role: 'user', text: 'продолжай' },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'tu-1' }] },
+  ]
+  const r = await outcome($.tool.call(window('tu-1')))
+  expect(String(r.deny)).toContain('нет блоком в вашем сообщении')
+  expect(env.opened ?? 0).toBe(0)
+  expect(list(env, MAIN).length).toBe(0)
+
+  // Команда в этом ходе — раньше, до результатов других инструментов, — окно показывается
+  env.messages = [
+    { role: 'user', text: 'продолжай' },
+    { role: 'assistant', text: block, toolUses: [{ tool_use_id: 'tu-0' }] },
+    { role: 'user', text: '', toolResults: [{ tool_use_id: 'tu-0' }] },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'tu-2' }] },
+  ]
+  const ok: any = await $.tool.call(window('tu-2'))
+  expect(ok.deny).toBeUndefined()
+  expect(env.opened).toBe(1)
+
+  // Текст и окно в одном сообщении, команда перенесена по строкам иначе — показывается
+  env.messages = [
+    { role: 'user', text: 'продолжай' },
+    { role: 'assistant', text: block.replace(' -File ', '\n  -File '), toolUses: [{ tool_use_id: 'tu-3' }] },
+  ]
+  expect(((await $.tool.call(window('tu-3'))) as any).deny).toBeUndefined()
+  expect(env.opened).toBe(2)
+
+  // Команда в тексте, но не блоком — не считается; в отказе — сама команда
+  env.messages = [
+    { role: 'user', text: 'продолжай' },
+    { role: 'assistant', text: 'Запустите `' + cmd + '` на сервере.', toolUses: [{ tool_use_id: 'tu-4' }] },
+  ]
+  const inline = await outcome($.tool.call(window('tu-4')))
+  expect(String(inline.deny)).toContain(cmd)
+  expect(env.opened).toBe(2)
+
+  // Два вопроса «Запустил»: в чате только первая команда — отказ по второму
+  const other = 'powershell -File C:\\Data\\second.ps1'
+  env.messages = [
+    { role: 'user', text: 'продолжай' },
+    { role: 'assistant', text: block, toolUses: [{ tool_use_id: 'tu-5' }] },
+  ]
+  const two = await outcome($.tool.call({ ...window('tu-5'), questions: [ran('Первый?', cmd), ran('Второй?', other)] }))
+  expect(String(two.deny)).toContain('Второй?')
+  expect(env.opened).toBe(2)
+
+  // Окно субагента сверяется с журналом субагента
+  env.messages = []
+  env.agentMessages = { 'ag-1': [{ role: 'user', text: 'задание' }, { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'tu-6' }] }] }
+  const agent = await outcome($.tool.call(window('tu-6', { agentId: 'ag-1' })))
+  expect(String(agent.deny)).toContain('нет блоком')
+  expect(env.opened).toBe(2)
+
+  // Сообщения с вызовом в журнале нет, журнал недоступен, нет tool_use_id — не проверяем, окно показывается
+  env.messages = []
+  expect(((await $.tool.call(window('tu-7'))) as any).deny).toBeUndefined()
+  env.messagesFail = true
+  expect(((await $.tool.call(window('tu-8'))) as any).deny).toBeUndefined()
+  env.messagesFail = false
+  expect(((await $.tool.call({ ...window('tu-9'), tool_use_id: undefined })) as any).deny).toBeUndefined()
+  expect(env.opened).toBe(5)
 })
 
 test('тот же вопрос уже в панели — флажки и команда берутся из окна', async ($, on) => {

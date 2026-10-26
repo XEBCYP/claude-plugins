@@ -295,6 +295,45 @@ function missingCommand(questions: Question[]): string | undefined {
   )
 }
 
+// Команда в окне есть, а в чате нет: 26.10 глобальная сессия после отказа missingCommand положила блок только в preview —
+// окно прошло, а в чате пользователь команды не увидел (preview виден лишь на выбранном варианте). Ищем ту же команду
+// блоком оболочки в тексте ответов Claude этого хода — от сообщения с этим вызовом назад до сообщения пользователя
+// (вставки движка посреди хода — текст навыка, сообщение плагина — тоже его конец: один лишний повтор команды, не цикл).
+// Сообщения с вызовом в журнале нет (движок не успел записать) — не проверяем: лучше пропустить окно, чем отказывать
+// ему без конца. Окно субагента — по журналу субагента.
+const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
+async function missingInChat($: any, questions: Question[], toolUseId?: string, agentId?: string): Promise<string | undefined> {
+  const wanted = questions
+    .filter(one => (one.options ?? []).some(o => RAN.test(o.label)))
+    .map(q => ({ q, command: fencedOf(q) }))
+    .filter((one): one is { q: Question; command: string } => !!one.command)
+  if (wanted.length === 0 || !toolUseId) return undefined
+  let rows: { role: string; text: string; toolUses?: { tool_use_id: string }[]; toolResults?: unknown[] }[]
+  try {
+    rows = await $.session.messages(agentId ? { agentId } : undefined)
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(rows)) return undefined
+  const at = rows.findLastIndex(m => m.role === 'assistant' && (m.toolUses ?? []).some(t => t.tool_use_id === toolUseId))
+  if (at < 0) return undefined
+  let said = ''
+  for (let i = at; i >= 0; i--) {
+    const m = rows[i]
+    if (m.role === 'user' && !m.toolResults?.length) break
+    if (m.role === 'assistant') said = m.text + '\n' + said
+  }
+  const blocks = [...said.matchAll(new RegExp(FENCE.source, 'gi'))].map(found => flat(found[1]))
+  const lost = wanted.find(one => !blocks.includes(flat(one.command)))
+  if (!lost) return undefined
+  return (
+    `Окно не показано: команды из вопроса «${lost.q.question.slice(0, 80)}» нет блоком в вашем сообщении этого хода. ` +
+    'В окне команда видна только на выбранном варианте, а после ответа исчезает — пользователь должен видеть её в ' +
+    'чате. В том же ответе, что и окно, напишите строку «где запускать» и ровно эту команду отдельным блоком ' +
+    `\`\`\`powershell:\n${lost.command.slice(0, 400)}\nЗатем задайте окно снова.`
+  )
+}
+
 // Пользователь отправил сообщение, не ответив: приложение закрывает окно и вместо ответа даёт заглушку «[User did not
 // answer this question — they sent a message instead. Treat that message as their response; do not re-ask.]». Это не
 // ответ: вопрос остаётся в панели, а Claude получает вместо заглушки notAnswered — задать вопрос снова в конце хода.
@@ -448,7 +487,7 @@ export const register: Register = on => {
     if (next.origin.plugin !== 'engine') return next(e)
     const all = e.questions as Question[]
     // До разбора ответов из панели: отказ не трогает later, и исправленный повтор окна получит их как обычно
-    const noCommand = missingCommand(all)
+    const noCommand = missingCommand(all) ?? (await missingInChat($, all, e.tool_use_id, e.agentId))
     if (noCommand) return { deny: noCommand }
     // Повтор вопроса, на который пользователь уже ответил кнопкой панели, пока шёл ход: ответ сразу, без окна и без
     // новой записи в панели; в окне — только остальные вопросы
