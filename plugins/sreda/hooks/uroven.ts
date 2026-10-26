@@ -73,7 +73,7 @@ async function context($: any): Promise<number> {
 
 // Своя часть строки под полем ввода — первой; токены и лимиты дописывает hooks/stroka.ts
 function show($: any): void {
-  const text = `Усилия: ${NAMES[level]}`
+  const text = NAMES[level]
   if (text === shown) return
   shown = text
   void showEffort($, text)
