@@ -530,3 +530,49 @@ test('запуск -p или SDK (isInteractive false, не приложение
   expect(env.forks).toBe(0)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
+
+function nudges(r: any): string[] {
+  return (r.context ?? []).filter((t: string) => t.startsWith('Автопередача:'))
+}
+
+test('посреди хода с 250 тыс. — напоминание закончить ход, следующее через 50 тыс.', async ($, on) => {
+  const env = fresh()
+  env.k = 200
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'большая задача', turnId: 't1' })
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never))).toEqual([])
+  env.k = 260
+  const first = nudges(await $.tool.call({ tool: 'Read', file_path: 'b' } as never))
+  expect(first.length).toBe(1)
+  expect(first[0]).toContain('260 тыс.')
+  env.k = 290
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'c' } as never))).toEqual([])
+  env.k = 315
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'd' } as never)).length).toBe(1)
+  // Субагент и итоговое окно напоминания не получают
+  env.k = 400
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'e', agentId: 'ag1' } as never))).toEqual([])
+  expect(nudges(await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'x' } as never))).toEqual([])
+})
+
+test('напоминания нет: вне хода и при выключенной автопередаче', async ($, on) => {
+  const env = fresh()
+  env.k = 300
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never))).toEqual([])
+  await $.command.run({ command: 'autohandoff', args: 'off' } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'b' } as never))).toEqual([])
+})
+
+test('в запуске -p или SDK напоминания посреди хода нет', async ($, on) => {
+  const env = fresh()
+  env.k = 300
+  env.entrypoint = 'sdk-cli'
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never))).toEqual([])
+})
