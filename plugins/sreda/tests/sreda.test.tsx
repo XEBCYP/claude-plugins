@@ -38,6 +38,11 @@ type Env = {
   asked?: string[][]
   // Окно отклонено (Esc)
   deny?: boolean
+  // Панель открыта (false — пользователь закрыл её крестиком); сколько раз модуль её открывал
+  paneUp?: boolean
+  paneOpens?: number
+  // Папки: путь → имена вложенных папок (для $.fs.list)
+  dirs?: Record<string, string[]>
 }
 
 const SKIPPED =
@@ -49,7 +54,19 @@ function engine(on: any, env: Env) {
   mock.env(on, { USERPROFILE: 'C:\\Users\\tester' })
   on('command.register', () => ({ value: { command: 'zhdut-otveta' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__sreda__${e.name}` } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', () => {
+    env.paneOpens = (env.paneOpens ?? 0) + 1
+    env.paneUp = true
+    return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => ({
+    value: env.paneUp === false ? [] : [{ id: 'zhdut-otveta', title: 'Ждут ответа', isShown: true, isFocused: false, isPlaced: true }],
+  }))
+  on('fs.list', (_: unknown, e: { path: string }) => {
+    const names = env.dirs?.[e.path.replace(/\\/g, '/')]
+    if (!names) throw new Error('ENOENT')
+    return { value: names.map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
+  })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
@@ -586,21 +603,11 @@ test('несколько ответов в окне — в архив уходи
   expect(done.picked).toEqual(['Базы', 'Агент'])
 })
 
-test('команда для пользователя из preview — в панели рамка и кнопка «Скопировать команду»', async ($, on) => {
+test('команда для пользователя из preview — в панели блок кода, без своей кнопки «Скопировать команду»', async ($, on) => {
   // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
   let release = () => {}
   const env: Env = { files: {}, submits: [], dialog: 'Позже', gate: new Promise<void>(r => (release = r)) }
   engine(on, env)
-  const copied: string[] = []
-  const toasts: string[] = []
-  on('ui.copy', (_: unknown, e: { text: string }) => {
-    copied.push(e.text)
-    return { value: { isCopied: true } }
-  })
-  on('ui.toast', (_: unknown, e: any) => {
-    toasts.push(String(e.text ?? e))
-    return { value: undefined }
-  })
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
 
   const cmd = 'powershell -ExecutionPolicy Bypass -File "C:\Data\install.ps1"'
@@ -621,11 +628,10 @@ test('команда для пользователя из preview — в пан�
   expect(it.command).toBe(cmd)
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: `${it.id}:copy` })
-  expect(copied).toEqual([cmd])
-  expect(toasts.length).toBe(1)
-  // Копирование на вопрос не отвечает
-  expect(list(env, MAIN).length).toBe(1)
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+  // Копирует значок самого блока кода; своя большая кнопка убрана (26.10, пользователь: лишняя)
+  expect(await ui.find({ type: 'Button', text: /Позже/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /Скопировать команду/ })).toBeUndefined()
   await ui.unmount()
   release()
   await call
@@ -749,4 +755,71 @@ test('тот же вопрос уже в панели — флажки и ком
   expect(it.multi).toBe(true)
   release()
   await call
+})
+
+const other = (id: string, question: string) => ({
+  id, from: 'Other', question, options: [{ label: 'Да' }], status: 'open', session: 'sess-2',
+})
+
+test('панель закрыта крестиком — новый вопрос открывает её снова, старый — нет', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Да' }
+  env.files[MAIN] = JSON.stringify({ items: [other('q1', 'Старый?')] })
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  expect(env.paneOpens).toBe(1)
+
+  // Пользователь закрыл панель; опрос с тем же списком её не открывает
+  env.paneUp = false
+  await clock.advance(1500)
+  expect(env.paneOpens).toBe(1)
+
+  // Вопрос другой сессии появился в файле — панель снова открыта
+  env.files[MAIN] = JSON.stringify({ items: [other('q1', 'Старый?'), other('q2', 'Новый?')] })
+  await clock.advance(1500)
+  expect(env.paneOpens).toBe(2)
+
+  // Открытую панель новый вопрос не переоткрывает
+  env.files[MAIN] = JSON.stringify({ items: [other('q1', 'Старый?'), other('q2', 'Новый?'), other('q3', 'Ещё?')] })
+  await clock.advance(1500)
+  expect(env.paneOpens).toBe(2)
+})
+
+test('сессия подпроекта — панель сама не открывается, вопросы всё равно в файле', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: null }
+  env.dirs = { 'c:/projects': ['Global', 'Demo', 'Other'] }
+  env.files['c:/projects/Global/docs/Подпроекты.md'] =
+    '# Реестр\n\n## 1. Demo\n\n- **Где:** `C:\\Projects\\Demo`, ветка `main`.\n'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  expect(env.paneOpens ?? 0).toBe(0)
+
+  env.paneUp = false
+  env.files[MAIN] = JSON.stringify({ items: [other('q2', 'Новый?')] })
+  await clock.advance(1500)
+  expect(env.paneOpens ?? 0).toBe(0)
+
+  // Вопрос самого подпроекта — в общий файл (его покажет панель глобальной), панель здесь закрыта
+  const pending = ask($)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await clock.advance(1500)
+  expect(list(env, MAIN).some(one => one.question === Q)).toBe(true)
+  expect(env.paneOpens ?? 0).toBe(0)
+
+  // Вручную — открывается
+  await $.command.run({ command: 'zhdut-otveta' })
+  expect(env.paneOpens).toBe(1)
+  const mine = list(env, MAIN).find(one => one.question === Q)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `${mine.id}:0` })
+  expect((await pending).result.answers[Q]).toBe('Да')
+  await ui.unmount()
+})
+
+test('реестр не называет эту папку — обычная сессия, панель открыта', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Да' }
+  env.dirs = { 'c:/projects': ['Global', 'Demo'] }
+  env.files['c:/projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Demo2`, ветка `main`.\n'
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  expect(env.paneOpens).toBe(1)
 })
