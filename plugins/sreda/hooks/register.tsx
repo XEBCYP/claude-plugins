@@ -288,56 +288,23 @@ function missingCommand(questions: Question[]): string | undefined {
   if (!q) return undefined
   return (
     `Окно не показано: в вопросе «${q.question.slice(0, 80)}» есть вариант «запустил», но нет команды, которую ` +
-    'пользователь скопирует. Перед окном напишите в сообщении строку «где запускать» (компьютер; обычный PowerShell ' +
-    'или администратор) и команду отдельным блоком ```powershell; в preview рекомендуемого варианта — та же команда ' +
-    'тем же блоком ```powershell (по нему панель «Ждут ответа» покажет команду блоком с кнопкой копирования). Команду ' +
-    'подпроекта, если её нет целиком, сначала возьмите у подпроекта. Затем задайте окно снова.'
+    'пользователь скопирует. В preview рекомендуемого варианта положите строку «где запускать» (компьютер; обычный ' +
+    'PowerShell или администратор) и команду блоком ```powershell: по нему плагин покажет команду над вариантами окна ' +
+    'и в панели «Ждут ответа». Текст посреди хода пользователь видит пересказом, без блоков, — команду ещё раз дайте ' +
+    'блоком в последнем сообщении хода. Команду подпроекта, если её нет целиком, сначала возьмите у подпроекта. Затем ' +
+    'задайте окно снова.'
   )
 }
 
-// Команда в окне есть, а в чате нет: 26.10 глобальная сессия после отказа missingCommand положила блок только в preview —
-// окно прошло, а в чате пользователь команды не увидел (preview виден лишь на выбранном варианте). Ищем ту же команду
-// блоком оболочки в тексте ответов Claude этого хода — от сообщения с этим вызовом назад до сообщения пользователя
-// (вставки движка посреди хода — текст навыка, сообщение плагина — тоже его конец: один лишний повтор команды, не цикл).
-// Сообщения с вызовом в журнале нет (движок не успел записать) — не проверяем: лучше пропустить окно, чем отказывать
-// ему без конца. Окно субагента — по журналу субагента.
-// Журнал — в форме API: текст перед вызовом инструмента движок хранит блоком thinking (подпись «narration»), а поле
-// text строк $.session.messages() собирает только блоки text — 26.10 окно с командой в чате получило отказ. Настоящие
-// рассуждения в журнале пустые, так что команда из них не засчитается.
-type Block = { type: string; text?: string; thinking?: string; id?: string }
-const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
-async function missingInChat($: any, questions: Question[], toolUseId?: string, agentId?: string): Promise<string | undefined> {
-  const wanted = questions
+// Команды окна для рисунка над вариантами (ui.render AskUserQuestion): preview виден лишь на выбранном варианте, а текст
+// Claude посреди хода приложение показывает пересказом, без блоков кода (26.10: sreda 1.5.5–1.5.6 искали команду в чате
+// этого хода и отказывали каждому окну). Поэтому команду рисует сам плагин — по вопросам с вариантом «Запустил».
+function commandsOf(questions: Question[]): string[] {
+  const found = questions
     .filter(one => (one.options ?? []).some(o => RAN.test(o.label)))
-    .map(q => ({ q, command: fencedOf(q) }))
-    .filter((one): one is { q: Question; command: string } => !!one.command)
-  if (wanted.length === 0 || !toolUseId) return undefined
-  let rows: { role: string; content: Block[] | string }[]
-  try {
-    rows = await $.session.messages(agentId ? { agentId, as: 'api' } : { as: 'api' })
-  } catch {
-    return undefined
-  }
-  if (!Array.isArray(rows)) return undefined
-  const partsOf = (m: { content: Block[] | string }): Block[] =>
-    typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : []
-  const at = rows.findLastIndex(m => m.role === 'assistant' && partsOf(m).some(b => b.type === 'tool_use' && b.id === toolUseId))
-  if (at < 0) return undefined
-  let said = ''
-  for (let i = at; i >= 0; i--) {
-    const m = rows[i]
-    if (m.role === 'user' && !partsOf(m).some(b => b.type === 'tool_result')) break
-    if (m.role === 'assistant') said = partsOf(m).map(b => (b.type === 'text' ? b.text : b.type === 'thinking' ? b.thinking : '') ?? '').join('\n') + '\n' + said
-  }
-  const fenced = [...said.matchAll(new RegExp(FENCE.source, 'gi'))].map(found => flat(found[1]))
-  const lost = wanted.find(one => !fenced.includes(flat(one.command)))
-  if (!lost) return undefined
-  return (
-    `Окно не показано: команды из вопроса «${lost.q.question.slice(0, 80)}» нет блоком в вашем сообщении этого хода. ` +
-    'В окне команда видна только на выбранном варианте, а после ответа исчезает — пользователь должен видеть её в ' +
-    'чате. В том же ответе, что и окно, напишите строку «где запускать» и ровно эту команду отдельным блоком ' +
-    `\`\`\`powershell:\n${lost.command.slice(0, 400)}\nЗатем задайте окно снова.`
-  )
+    .map(fencedOf)
+    .filter((one): one is string => !!one)
+  return [...new Set(found)]
 }
 
 // Пользователь отправил сообщение, не ответив: приложение закрывает окно и вместо ответа даёт заглушку «[User did not
@@ -493,7 +460,7 @@ export const register: Register = on => {
     if (next.origin.plugin !== 'engine') return next(e)
     const all = e.questions as Question[]
     // До разбора ответов из панели: отказ не трогает later, и исправленный повтор окна получит их как обычно
-    const noCommand = missingCommand(all) ?? (await missingInChat($, all, e.tool_use_id, e.agentId))
+    const noCommand = missingCommand(all)
     if (noCommand) return { deny: noCommand }
     // Повтор вопроса, на который пользователь уже ответил кнопкой панели, пока шёл ход: ответ сразу, без окна и без
     // новой записи в панели; в окне — только остальные вопросы
@@ -572,6 +539,23 @@ export const register: Register = on => {
         if (!busy) flush($)
       }
     }
+  })
+
+  // Команда над вариантами окна, какой вариант ни выбран: блок кода с копированием. Дерево вокруг окна — узел движка
+  // ровно один раз; лишнее по строкам (12 в терминале, 48 в приложении) движок отклонит и нарисует своё окно
+  on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
+    const commands = commandsOf((e.props.questions ?? []) as Question[])
+    if (commands.length === 0) return next(e)
+    const { Box, Text, Code } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text bold>{commands.length === 1 ? 'Команда:' : 'Команды:'}</Text>
+        {commands.map((command, k) => (
+          <Code key={`cmd-${k}`} source={command} language="powershell" />
+        ))}
+        {await next(e)}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
