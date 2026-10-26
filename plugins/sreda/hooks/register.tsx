@@ -290,7 +290,7 @@ function missingCommand(questions: Question[]): string | undefined {
     `Окно не показано: в вопросе «${q.question.slice(0, 80)}» есть вариант «запустил», но нет команды, которую ` +
     'пользователь скопирует. Перед окном напишите в сообщении строку «где запускать» (компьютер; обычный PowerShell ' +
     'или администратор) и команду отдельным блоком ```powershell; в preview рекомендуемого варианта — та же команда ' +
-    'тем же блоком ```powershell (по нему панель «Ждут ответа» покажет кнопку «Скопировать команду»). Команду ' +
+    'тем же блоком ```powershell (по нему панель «Ждут ответа» покажет команду блоком с кнопкой копирования). Команду ' +
     'подпроекта, если её нет целиком, сначала возьмите у подпроекта. Затем задайте окно снова.'
   )
 }
@@ -326,10 +326,6 @@ async function markMissed($: any, ids: string[]): Promise<void> {
   await update($, items, () => list)
 }
 
-async function copyCommand($: any, it: Pending, surface: unknown): Promise<void> {
-  const r = await $.ui.copy({ text: it.command, surface })
-  $.ui.toast(r.isCopied ? 'Команда скопирована — вставьте её Ctrl+V' : `Не скопировалось: ${r.reason ?? 'причина неизвестна'}`)
-}
 
 // Вопросы окна — в панель. Тот же открытый вопрос, записанный раньше вручную, не дублируется, а становится нашим.
 // hold(ids) — до записи в файл: кнопка панели не должна застать вопрос, окно которого ещё не ждёт ответа.
@@ -550,14 +546,9 @@ export const register: Register = on => {
               <Text color="warning">Окно в сессии закрылось вашим сообщением, ответа не было — вопрос ждёт здесь.</Text>
             ) : null}
             {it.why ? <Text>{it.why}</Text> : null}
-            {it.command ? (
-              <Box flexDirection="column" gap={1} borderStyle="round" padding={1}>
-                <Code source={it.command} language="powershell" />
-                <Button key={`${it.id}:copy`} variant="primary" onPress={(press: any) => void copyCommand($, it, press.surface)}>
-                  Скопировать команду
-                </Button>
-              </Box>
-            ) : null}
+            {/* Своя кнопка «Скопировать команду» под блоком убрана (26.10, пользователь: лишняя) — у блока кода есть свой
+                значок «Копировать код» */}
+            {it.command ? <Code source={it.command} language="powershell" /> : null}
             {it.multi ? <Text dimColor>Можно выбрать несколько: отметьте и нажмите «Ответить».</Text> : null}
             {it.options.map((opt, k) => (
               <Box key={`${it.id}-${k}`} flexDirection="column">

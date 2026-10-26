@@ -603,21 +603,11 @@ test('несколько ответов в окне — в архив уходи
   expect(done.picked).toEqual(['Базы', 'Агент'])
 })
 
-test('команда для пользователя из preview — в панели рамка и кнопка «Скопировать команду»', async ($, on) => {
+test('команда для пользователя из preview — в панели блок кода, без своей кнопки «Скопировать команду»', async ($, on) => {
   // Окно ответит, когда тест отпустит: висящее окно получило бы ответ уже в следующем тесте
   let release = () => {}
   const env: Env = { files: {}, submits: [], dialog: 'Позже', gate: new Promise<void>(r => (release = r)) }
   engine(on, env)
-  const copied: string[] = []
-  const toasts: string[] = []
-  on('ui.copy', (_: unknown, e: { text: string }) => {
-    copied.push(e.text)
-    return { value: { isCopied: true } }
-  })
-  on('ui.toast', (_: unknown, e: any) => {
-    toasts.push(String(e.text ?? e))
-    return { value: undefined }
-  })
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
 
   const cmd = 'powershell -ExecutionPolicy Bypass -File "C:\Data\install.ps1"'
@@ -638,11 +628,10 @@ test('команда для пользователя из preview — в пан�
   expect(it.command).toBe(cmd)
 
   const ui = await $.ui.mount(PANE)
-  await ui.press({ key: `${it.id}:copy` })
-  expect(copied).toEqual([cmd])
-  expect(toasts.length).toBe(1)
-  // Копирование на вопрос не отвечает
-  expect(list(env, MAIN).length).toBe(1)
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+  // Копирует значок самого блока кода; своя большая кнопка убрана (26.10, пользователь: лишняя)
+  expect(await ui.find({ type: 'Button', text: /Позже/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /Скопировать команду/ })).toBeUndefined()
   await ui.unmount()
   release()
   await call
