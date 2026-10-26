@@ -29,6 +29,59 @@ let mineOpen = new Set<string>()
 let me = ''
 // Что панель показывает сейчас (JSON списка) — опрос перерисовывает её, только когда файл изменился
 let lastShown = ''
+// Вопросы, которые эта сессия уже видела: новый снова открывает панель, закрытую крестиком (26.10 пользователь закрыл
+// её в глобальной сессии, и новые вопросы туда больше не показывались). undefined — первый опрос ещё не прошёл.
+let seen: Set<string> | undefined
+// Сессия подпроекта: панель сама не открывается — вопросы пользователю задаёт глобальная, и в подпроекте та же общая
+// панель только дублировала их (sreda:globalnyj-proekt). Вручную — /zhdut-otveta.
+let quiet = false
+
+// Подпроект — папка, которую реестр глобального проекта (docs/Подпроекты.md в соседней папке) называет в строке
+// «**Где:** `путь`». Строке в CLAUDE.md не доверяем: у части подпроектов её нет.
+const REGISTRY = 'docs/Подпроекты.md'
+const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
+const norm = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
+
+async function subproject($: any): Promise<boolean> {
+  const cwd = norm(String(await $.session.cwd()))
+  const cut = cwd.lastIndexOf('/')
+  if (cut <= 0) return false
+  const parent = cwd.slice(0, cut)
+  let entries: { name: string; kind: string }[] = []
+  try {
+    entries = await $.fs.list(parent)
+  } catch {
+    return false
+  }
+  for (const one of entries) {
+    if (one.kind !== 'dir' || norm(`${parent}/${one.name}`) === cwd) continue
+    let text = ''
+    try {
+      text = await $.fs.read(`${parent}/${one.name}/${REGISTRY}`)
+    } catch {
+      continue
+    }
+    for (const m of String(text).matchAll(WHERE)) {
+      const where = norm(m[1])
+      if (cwd === where || cwd.startsWith(`${where}/`)) return true
+    }
+  }
+  return false
+}
+
+async function showPane($: any): Promise<void> {
+  await $.ui.open({ id: PANE, title: 'Ждут ответа' })
+}
+
+// Новый вопрос в файле — открыть панель, если её закрыли (открытую — не трогать: open перехватил бы вкладку)
+async function reveal($: any, list: Pending[]): Promise<void> {
+  const fresh = list.filter(one => !seen?.has(one.id))
+  const first = seen === undefined
+  seen = new Set(list.map(one => one.id))
+  if (first || quiet || fresh.length === 0) return
+  if ((await $.ui.panes()).some((pane: { id: string }) => pane.id === PANE)) return
+  await showPane($)
+}
 
 // Файлы общие для всех сессий этого компьютера — в папке пользователя.
 async function file($: any, name = NAME): Promise<string> {
@@ -86,6 +139,7 @@ async function refresh($: any): Promise<void> {
     lastShown = shown
     await update($, items, () => list)
   }
+  await reveal($, list)
   // Отметки вопросов, которых в файле больше нет (ответили в другой сессии), — убрать
   const marked = await read($, picks)
   if (Object.keys(marked).some(id => !list.some(one => one.id === id))) {
@@ -346,11 +400,13 @@ export const register: Register = on => {
     answeredTool = reg.tool
     resetStroka()
     await startUroven($)
+    quiet = await subproject($)
+    seen = undefined
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
     void measure($)
     $.clock.every(MEASURE_MS, () => void measure($))
-    void $.ui.open({ id: PANE, title: 'Ждут ответа' })
+    if (!quiet) void showPane($)
     return next(e)
   })
 
@@ -371,7 +427,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'zhdut-otveta' }, async $ => {
     await refresh($)
-    await $.ui.open({ id: PANE, title: 'Ждут ответа' })
+    await showPane($)
     return { text: 'Панель «Ждут ответа» открыта.' }
   })
 
