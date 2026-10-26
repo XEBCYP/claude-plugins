@@ -576,3 +576,39 @@ test('в запуске -p или SDK напоминания посреди хо
   await $.turn.start({ text: 'задача', turnId: 't1' })
   expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never))).toEqual([])
 })
+
+test('глобальная сессия: напоминание с 200 тыс., следующее через 30 тыс.', async ($, on) => {
+  const env = fresh()
+  env.globalCwd = 'C:/Projects/Global'
+  env.k = 205
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never)).length).toBe(1)
+  env.k = 230
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'b' } as never))).toEqual([])
+  env.k = 236
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'c' } as never)).length).toBe(1)
+})
+
+test('после «Отменить» напоминания нет до +50 тыс.; во время записи документа — нет', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'cancel' })
+  await $.turn.start({ text: 'дальше', turnId: 't2' })
+  env.k = 290
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never))).toEqual([])
+  env.k = 312
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'b' } as never)).length).toBe(1)
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't2' } as never)
+  // Передача началась: ход записи документа напоминаний не получает
+  await $.command.run({ command: 'autohandoff', args: 'now' } as never)
+  await clock.settle()
+  await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
+  env.k = 400
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'c' } as never))).toEqual([])
+})
