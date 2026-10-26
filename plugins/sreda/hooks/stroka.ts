@@ -1,10 +1,10 @@
-// Строка под полем ввода (плагин sreda): уровень усилий, токены переписки и лимиты подписки — одной строкой,
-// поровну разделёнными частями. Вместо чужого мода ctx (шкалы CTX/5H/7D, автор — Никита Велс): процент окна
-// контекста ничего не говорил, а автопередача (autohandoff) считает в тысячах токенов — 150K, 200K, 250K.
-// Десктоп рисует строку статуса своим шрифтом и цветом: мод отдаёт только текст, обычные пробелы десктоп схлопывает —
-// поэтому между частями em-пробелы.
-const SEP = ' · '
-const CELLS = 8
+// Строка под полем ввода (плагин sreda): уровень усилий, токены переписки и лимиты подписки — одной строкой.
+// Вместо чужого мода ctx (шкалы CTX/5H/7D, автор — Никита Велс): процент окна контекста ничего не говорил,
+// а автопередача (autohandoff) считает в тысячах токенов — 150K, 200K, 250K.
+// Десктоп рисует строку статуса своим шрифтом в узком месте между режимом и моделью и обрезает многоточием: шкалы,
+// слово «TKN» и em-пробелы прятали лимиты (26.10.2026), поэтому строка короткая — «высокий · 149K · 5H 95% до 2:00».
+// Последним стоит недельный лимит: при нехватке места скрывается первым.
+const SEP = ' · '
 const DAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб']
 // Раз в столько обновлять токены и лимиты между ходами: лимит 5 часов тратят и другие сессии
 export const MEASURE_MS = 30_000
@@ -16,11 +16,6 @@ let tokens: number | undefined
 let h5: Limit | undefined
 let d7: Limit | undefined
 let shown = ''
-
-function cells(p: number): string {
-  const full = Math.max(0, Math.min(CELLS, Math.round((p / 100) * CELLS)))
-  return '▪'.repeat(full) + '▫'.repeat(CELLS - full)
-}
 
 const two = (n: number) => String(n).padStart(2, '0')
 const clock = (d: Date) => `${d.getHours()}:${two(d.getMinutes())}`
@@ -45,21 +40,21 @@ export function kilo(n: number | undefined): string {
 function limit(name: string, it: Limit | undefined, now: number): string | undefined {
   if (!it) return undefined
   // Лимит уже сбросился, а нового ответа с цифрами не было (пауза) — израсходовано 0, а не прежние 95%
-  if (it.resetsAt !== undefined && it.resetsAt <= now) return `${name} ${cells(0)} 0%`
+  if (it.resetsAt !== undefined && it.resetsAt <= now) return `${name} 0%`
   const left = it.resetsAt !== undefined ? ` ${until(it.resetsAt, now)}` : ''
-  return `${name} ${cells(it.percent)} ${Math.round(it.percent)}%${left}`
+  return `${name} ${Math.round(it.percent)}%${left}`
 }
 
 async function paint($: any): Promise<void> {
   const now = Number(await $.clock.now())
-  const parts = [effort, `TKN ${kilo(tokens)}`, limit('5H', h5, now), limit('7D', d7, now)].filter(Boolean)
+  const parts = [effort, kilo(tokens), limit('5H', h5, now), limit('7D', d7, now)].filter(Boolean)
   const text = parts.join(SEP)
   if (text === shown) return
   shown = text
   $.ui.status(text)
 }
 
-// Часть уровня усилий (hooks/uroven.ts): «Усилия: высокий»
+// Часть уровня усилий (hooks/uroven.ts): «высокий»
 export async function showEffort($: any, text: string): Promise<void> {
   effort = text
   await paint($)

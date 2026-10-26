@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { kilo, until } from '../hooks/stroka'
 
 // Строка под полем ввода (hooks/stroka.ts): уровень усилий, токены, лимиты 5 часов и недели — одной строкой.
-const S = '\u2003·\u2003'
+const S = ' · '
 // Воскресенье 25.10.2026, 12:00 по часам машины
 const NOW = new Date(2026, 9, 25, 12, 0).getTime()
 
@@ -36,7 +36,7 @@ async function start($: any, on: any, env: Env) {
 
 const iso = (y: number, m: number, d: number, h: number, min: number) => new Date(y, m, d, h, min).toISOString()
 
-test('одна строка: усилия, токены в тысячах, 5H и 7D со шкалой, процентом и временем сброса', async ($, on) => {
+test('одна строка: усилия, токены в тысячах, 5H и 7D с процентом и временем сброса', async ($, on) => {
   const env: Env = {
     status: [],
     tokens: 152_400,
@@ -48,7 +48,7 @@ test('одна строка: усилия, токены в тысячах, 5H и
   await start($, on, env)
 
   expect(env.status.at(-1)).toBe(
-    `Усилия: средний${S}TKN 152K${S}5H ▪▪▪▫▫▫▫▫ 37% до 18:40${S}7D ▪▫▫▫▫▫▫▫ 12% до пт`,
+    `средний${S}152K${S}5H 37% до 18:40${S}7D 12% до пт`,
   )
 })
 
@@ -56,7 +56,7 @@ test('новая сессия до первого ответа: токенов �
   const env: Env = { status: [], limits: [] }
   await start($, on, env)
 
-  expect(env.status.at(-1)).toBe(`Усилия: средний${S}TKN —`)
+  expect(env.status.at(-1)).toBe(`средний${S}—`)
 })
 
 test('раз в 30 с и после ответа строка обновляет токены; пропавший лимит остаётся прежним', async ($, on) => {
@@ -66,20 +66,20 @@ test('раз в 30 с и после ответа строка обновляет
     limits: [{ kind: 'five_hour', percentUsed: 5, resetsAt: iso(2026, 9, 25, 15, 5) }],
   }
   const clock = await start($, on, env)
-  expect(env.status.at(-1)).toContain('TKN 10K')
+  expect(env.status.at(-1)).toContain('10K')
 
   env.tokens = 48_600
   env.limits = []
   await clock.advance(30_000)
-  expect(env.status.at(-1)).toBe(`Усилия: средний${S}TKN 49K${S}5H ▫▫▫▫▫▫▫▫ 5% до 15:05`)
+  expect(env.status.at(-1)).toBe(`средний${S}49K${S}5H 5% до 15:05`)
 
   env.tokens = 151_000
   await $.turn.complete({ turnId: 't1', answer: 'готово', durationMs: 1000, isAborted: false } as any)
   await new Promise(resolve => setTimeout(resolve, 0))
-  expect(env.status.at(-1)).toContain('TKN 151K')
+  expect(env.status.at(-1)).toContain('151K')
 })
 
-test('лимит сбросился в паузе — 0% без прежней шкалы; сброс завтра — «до завтра»', async ($, on) => {
+test('лимит сбросился в паузе — 0%, а не прежние проценты; сброс завтра — «до завтра»', async ($, on) => {
   const env: Env = {
     status: [],
     tokens: 80_000,
@@ -89,12 +89,12 @@ test('лимит сбросился в паузе — 0% без прежней �
     ],
   }
   const clock = await start($, on, env)
-  expect(env.status.at(-1)).toContain('5H ▪▪▪▪▪▪▪▪ 95% до 12:05')
-  expect(env.status.at(-1)).toContain('7D ▪▪▪▫▫▫▫▫ 40% до завтра 9:00')
+  expect(env.status.at(-1)).toContain('5H 95% до 12:05')
+  expect(env.status.at(-1)).toContain('7D 40% до завтра 9:00')
 
   // Новых ответов нет — цифры прежние, но время сброса 5 часов прошло
   await clock.advance(10 * 60_000)
-  expect(env.status.at(-1)).toBe(`Усилия: средний${S}TKN 80K${S}5H ▫▫▫▫▫▫▫▫ 0%${S}7D ▪▪▪▫▫▫▫▫ 40% до завтра 9:00`)
+  expect(env.status.at(-1)).toBe(`средний${S}80K${S}5H 0%${S}7D 40% до завтра 9:00`)
 })
 
 test('время сброса: сегодня — часы, завтра — «завтра», дальше — день недели; токены — в тысячах', () => {
