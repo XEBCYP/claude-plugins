@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Уровень усилий (hooks/uroven.ts). Хуки теста стоят за движок: запоминают, с каким уровнем ушёл запрос к модели и с
 // какими параметрами — вызов агента или подпроекта.
-type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number }
+type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number; files: Record<string, string> }
 
 function engine(on: any, env: Env) {
   mock.clock(on, { now: 1_000_000 })
@@ -19,8 +19,14 @@ function engine(on: any, env: Env) {
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
   on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: { tokens: env.tokens, window: 1_000_000 } } }))
-  on('fs.read', () => ({ value: '' }))
-  on('fs.write', () => ({ value: undefined }))
+  // Движок отдаёт путь в виде Windows — ключ с прямыми чертами
+  const key = (path: unknown) => String(path).split('\\').join('/')
+  on('fs.read', (_: unknown, e: any) => ({ value: env.files[key(e.path)] ?? '' }))
+  on('fs.exists', (_: unknown, e: any) => ({ value: key(e.path) in env.files }))
+  on('fs.write', (_: unknown, e: any) => {
+    env.files[key(e.path)] = String(e.text)
+    return { value: undefined }
+  })
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.step', async function* (_: unknown, e: any) {
     env.efforts.push(String(e.effort))
@@ -33,8 +39,10 @@ function engine(on: any, env: Env) {
   })
 }
 
-async function start($: any, on: any, tokens = 0): Promise<Env> {
-  const env: Env = { efforts: [], models: [], calls: [], status: [], tokens }
+const PROJECT = 'C:/Projects/Demo/.claude/sreda.json'
+
+async function start($: any, on: any, tokens = 0, files: Record<string, string> = {}): Promise<Env> {
+  const env: Env = { efforts: [], models: [], calls: [], status: [], tokens, files }
   engine(on, env)
   await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
   return env
@@ -177,4 +185,88 @@ test('подпроекты: Haiku — Sonnet, Fable — Opus, сверхвысо
   expect([s.model, s.effort]).toEqual(['claude-sonnet-5-5', 'low'])
   expect(m.model).toBe('claude-opus-5-5')
   expect(f.effort).toBe('high')
+})
+
+test('ручной режим проекта: уровень как в программе, без оценки и без потолка «высокий»; инструмент отказывает', async ($, on) => {
+  const env = await start($, on, 0, { [PROJECT]: '{"uroven": "ручной"}' })
+
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'xhigh')
+  const r: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'low' } as any)
+  await step($, 'xhigh')
+
+  expect(env.efforts).toEqual(['xhigh', 'xhigh'])
+  expect(String(r.result)).toContain('пользователь')
+  expect(env.status.at(-1)?.startsWith('вручную · сверхвысокий · ')).toBe(true)
+})
+
+test('пользователь сменил уровень в программе — до конца сессии «Среда» его не понижает', async ($, on) => {
+  const env = await start($, on)
+
+  await turn($, 'Почему не сходятся остатки по складу?')
+  await step($, 'medium')
+  await turn($, 'Покажи статус ветки.')
+  await step($, 'high')
+  await turn($, 'Покажи список файлов.')
+  await step($, 'high')
+
+  expect(env.efforts).toEqual(['high', 'high', 'high'])
+  expect(env.status.at(-1)?.startsWith('вручную · высокий · ')).toBe(true)
+})
+
+test('/uroven ручной пишет файл проекта, сохраняя прочие ключи; /uroven авто — оценка снова работает', async ($, on) => {
+  const env = await start($, on, 0, { [PROJECT]: '{"other": 1}' })
+
+  const a: any = await $.command.run({ command: 'uroven', args: 'ручной' })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'medium')
+  expect(JSON.parse(env.files[PROJECT])).toEqual({ other: 1, uroven: 'ручной' })
+  expect(String(a.text)).toContain('Ручной режим')
+
+  const s: any = await $.command.run({ command: 'uroven', args: '' })
+  await $.command.run({ command: 'uroven', args: 'авто' })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'medium')
+
+  expect(String(s.text)).toContain('ставите вы')
+  expect(JSON.parse(env.files[PROJECT]).uroven).toBe('авто')
+  expect(env.efforts).toEqual(['medium', 'low'])
+})
+
+test('ручной режим сессии переживает перезагрузку плагина; смена модели — не выбор уровня', async ($, on) => {
+  const env = await start($, on)
+
+  const s1 = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', effort: 'medium', messageCount: 1 })
+  for await (const _ of s1) {
+    // ответа модели в тесте нет
+  }
+  // Запасная модель с другим уровнем по умолчанию — ручной режим не включается
+  const s2 = $.turn.step({ turnId: 't', index: 1, model: 'claude-sonnet-5-5', effort: 'high', messageCount: 1 })
+  for await (const _ of s2) {
+    // ответа модели в тесте нет
+  }
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'high')
+  expect(env.efforts.at(-1)).toBe('low')
+
+  // Пользователь поднял уровень — ручной; перезагрузка плагина (session.start снова) его не сбрасывает
+  await step($, 'max')
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'max')
+
+  expect(env.efforts.slice(-2)).toEqual(['max', 'max'])
+})
+
+test('/uroven: файл проекта не JSON — не перезаписывается; BOM в начале файла не мешает', async ($, on) => {
+  const env = await start($, on, 0, { [PROJECT]: '{ сломано' })
+
+  const r: any = await $.command.run({ command: 'uroven', args: 'ручной' })
+  expect(String(r.text)).toContain('не меняю')
+  expect(env.files[PROJECT]).toBe('{ сломано')
+
+  env.files[PROJECT] = '\uFEFF{"uroven": "ручной"}'
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  await step($, 'xhigh')
+  expect(env.efforts.at(-1)).toBe('xhigh')
 })
