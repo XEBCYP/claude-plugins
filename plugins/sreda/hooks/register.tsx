@@ -4,7 +4,7 @@ import type { Register } from 'claude-code'
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
 import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
-import { wakeCheck } from './probuzhdeniya'
+import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
 import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
 
@@ -440,6 +440,8 @@ export const register: Register = on => {
       busy = false
       flush($)
       void measure($)
+      // Чем сессия ответила на пробуждение — в журнал пробуждений (hooks/probuzhdeniya.ts)
+      await wakeDone($).catch(() => undefined)
     }
     return next(e)
   })
@@ -467,6 +469,7 @@ export const register: Register = on => {
 
   // Имя инструмента движок даёт при регистрации — сверяем с ним, а не с догадкой
   on('tool.call', async ($, e: any, next) => {
+    if (e.agentId === undefined && next.origin.plugin === 'engine') wakeTool(String(e.tool))
     // На паузе — без новых сессий (hooks/pauza.ts); раньше уровня усилий: он сам отвечает за запуск сессий
     const stop = e.agentId === undefined && next.origin.plugin === 'engine' ? pauzaDeny(e.tool) : null
     if (stop) return stop
