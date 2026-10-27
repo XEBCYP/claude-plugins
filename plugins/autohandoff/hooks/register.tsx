@@ -130,7 +130,7 @@ let askStep = usual.askStep
 let isGlobal = false
 let perHour = 2
 // Секунд отсчёта на полосе
-let countdown = 5
+let countdown = 15
 
 // Приложение усыпляет простаивающие диалоги и будит их новым процессом: переменные модуля пропадают,
 // поэтому всё, что нужно между ходами, лежит в $.store под id диалога
@@ -555,7 +555,7 @@ export const register: Register = (on, options) => {
   global = limits(options, 'global', { from: 150, to: 200, askStep: 30 })
   ;({ from, to, askStep } = usual)
   perHour = num(options.perHour, 2)
-  countdown = Math.max(1, Math.round(num(options.countdown, 5)))
+  countdown = Math.max(1, Math.round(num(options.countdown, 15)))
   mark = freshMark()
 
   on('session.start', async ($, e, next) => {
