@@ -14,6 +14,13 @@ type Env = {
   asks: number
   answer: string
   forkHangs?: boolean
+  // Ходы, которые мод отменил сам (жёсткий предел)
+  aborted?: string[]
+  // Папки ($.fs.list) и файлы ($.fs.read): реестр глобального проекта для сессии подпроекта
+  dirs?: Record<string, string[]>
+  files?: Record<string, string>
+  // Субагенты, которые сейчас работают
+  busy?: boolean
   toasts?: string[]
   // id диалога; после /clear приложение может дать новый
   id?: string
@@ -39,7 +46,21 @@ function engine(on: any, env: Env) {
   on('session.usage', () => ({
     value: { startedAt: 0, context: { window: 1_000_000, tokens: env.k * 1000, percent: env.k / 10 }, rateLimits: [] },
   }))
-  on('agent.list', () => ({ value: [] }))
+  on('agent.list', () => ({ value: env.busy ? [{ agentId: 'a1', status: 'running' }] : [] }))
+  on('turn.abort', (_: unknown, e: { turnId: string }) => {
+    env.aborted?.push(e.turnId)
+    return { value: undefined }
+  })
+  on('fs.list', (_: unknown, e: { path: string }) => {
+    const names = env.dirs?.[e.path.replace(/\\/g, '/').toLowerCase()]
+    if (!names) throw new Error('ENOENT')
+    return { value: names.map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
+  })
+  on('fs.read', (_: unknown, e: { path: string }) => {
+    const text = env.files?.[e.path.replace(/\\/g, '/').toLowerCase()]
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text }
+  })
   on('fs.stat', (_: unknown, e: { path: string }) => {
     // Движок отдаёт путь в виде ОС (на Windows — с обратной косой)
     if (env.globalCwd && e.path.replace(/\\/g, '/') === `${env.globalCwd}/docs/Подпроекты.md`) {
@@ -535,7 +556,7 @@ function nudges(r: any): string[] {
   return (r.context ?? []).filter((t: string) => t.startsWith('Автопередача:'))
 }
 
-test('посреди хода с 250 тыс. — напоминание закончить ход, следующее через 50 тыс.', async ($, on) => {
+test('посреди хода с 250 тыс. — напоминание закончить ход, следующее через 50 тыс.', { options: { hard: 500 } }, async ($, on) => {
   const env = fresh()
   env.k = 200
   engine(on, env)
@@ -591,7 +612,7 @@ test('глобальная сессия: напоминание с 200 тыс., 
   expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'c' } as never)).length).toBe(1)
 })
 
-test('после «Отменить» напоминания нет до +50 тыс.; во время записи документа — нет', async ($, on) => {
+test('после «Отменить» напоминания нет до +50 тыс.; во время записи документа — нет', { options: { hard: 500 } }, async ($, on) => {
   const env = fresh()
   env.k = 260
   const clock = engine(on, env)
@@ -611,4 +632,197 @@ test('после «Отменить» напоминания нет до +50 т�
   await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
   env.k = 400
   expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'c' } as never))).toEqual([])
+})
+
+// --- Пакет 3 аудита 27.10 (ADR 0015)
+
+test('жёсткий предел 300 тыс.: после действия ход отменён, документ с пометкой «ход прерван»', async ($, on) => {
+  const env = { ...fresh(), aborted: [] as string[] }
+  env.k = 290
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'большая задача', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await clock.settle()
+  expect(env.aborted).toEqual([])
+  env.k = 305
+  const r = await $.tool.call({ tool: 'Read', file_path: 'b' } as never)
+  await clock.settle()
+  expect(((r as any).context ?? []).some((t: string) => t.includes('жёсткого предела 300'))).toBe(true)
+  expect(env.aborted).toEqual(['t1'])
+  const write = env.commands.find(c => c.startsWith('autohandoff:write')) ?? ''
+  expect(write).toContain('Ход прерван автопередачей')
+})
+
+test('жёсткий предел: пока работает субагент — ход не прерывается', async ($, on) => {
+  const env = { ...fresh(), aborted: [] as string[], busy: true }
+  env.k = 320
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await clock.settle()
+  expect(env.aborted).toEqual([])
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+})
+
+test('жёсткий предел из настроек: hard 400', { options: { hard: 400 } }, async ($, on) => {
+  const env = { ...fresh(), aborted: [] as string[] }
+  env.k = 350
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await clock.settle()
+  expect(env.aborted).toEqual([])
+})
+
+const peer = (text: string) => ({ text, wait: false, origin: { kind: 'peer' } })
+
+test('событие с 250 тыс. при полосе не сбрасывает отсчёт: передача, событие — следом за документом', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const r = await $.prompt.submit(peer('Глобальная: R50 — ответ на вопрос') as never)
+  await clock.settle()
+  expect(typeof (r as any).drop).toBe('string')
+  const write = env.commands.find(c => c.startsWith('autohandoff:write')) ?? ''
+  expect(write).toContain('R50 — ответ на вопрос')
+  const path = /Сохрани документ в файл (\S+?)\.(\s|$)/.exec(write)?.[1] ?? ''
+  await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.commands).toContain('clear')
+  expect(env.submits[0]).toContain(path)
+  expect(env.submits[1]).toContain('Глобальная: R50 — ответ на вопрос')
+  expect(env.submits[1]).toContain('пока шла автопередача')
+})
+
+test('событие с 250 тыс. без полосы (сессия простаивает) — передача, событие следом', async ($, on) => {
+  const env = fresh()
+  env.k = 270
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  const r = await $.prompt.submit(peer('Сообщение от подпроекта') as never)
+  await clock.settle()
+  expect(typeof (r as any).drop).toBe('string')
+  expect((env.commands.find(c => c.startsWith('autohandoff:write')) ?? '')).toContain('Сообщение от подпроекта')
+})
+
+test('событие ниже 250 тыс. — идёт как обычно; сообщение плагина не придерживается никогда', async ($, on) => {
+  const env = fresh()
+  env.k = 200
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  expect('drop' in ((await $.prompt.submit(peer('ниже порога') as never)) as any)).toBe(false)
+  env.k = 300
+  const own = await $.prompt.submit({ text: 'Ответ на вопрос', wait: false, origin: { kind: 'plugin', name: 'sreda' } } as never)
+  await clock.settle()
+  expect('drop' in (own as any)).toBe(false)
+})
+
+test('сообщение другой сессии во время передачи не теряется: уходит в чистую сессию', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.command.run({ command: 'autohandoff', args: 'now' } as never)
+  await clock.settle()
+  const r = await $.prompt.submit(peer('Глобальная: пауза') as never)
+  expect(typeof (r as any).drop).toBe('string')
+  await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.submits.length).toBe(2)
+  expect(env.submits[0]).toContain('Следом придут сообщения')
+  expect(env.submits[1]).toContain('Глобальная: пауза')
+})
+
+test('сессия подпроекта: с 250 тыс. в конце хода — передача сразу, без полосы', async ($, on) => {
+  const env = {
+    ...fresh(),
+    dirs: { 'c:/projects': ['Global', 'Sub'] },
+    files: { 'c:/projects/global/docs/подпроекты.md': '## Sub\n**Где:** `C:\\Projects\\Sub`\n' },
+  }
+  env.k = 260
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Sub', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  await clock.settle()
+  // Без отсчёта: часы не двигались, а документ уже пишется
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+})
+
+test('счётчик действий: на 60-м действии напоминание, следующее — на 90-м', async ($, on) => {
+  const env = fresh()
+  env.k = 100
+  engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'задача', turnId: 't1' })
+  const hits: number[] = []
+  for (let n = 1; n <= 95; n += 1) {
+    const r = await $.tool.call({ tool: 'Read', file_path: `f${n}` } as never)
+    if (((r as any).context ?? []).some((t: string) => t.includes('действий'))) hits.push(n)
+  }
+  expect(hits).toEqual([60, 90])
+  // Новый ход — счёт сначала
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't1' } as never)
+  await $.turn.start({ text: 'дальше', turnId: 't2' })
+  const r = await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  expect(((r as any).context ?? []).some((t: string) => t.includes('действий'))).toBe(false)
+})
+
+test('отметка версии 2.2 (held — строки) читается: сообщение уходит от имени пользователя', async ($, on) => {
+  const env = fresh()
+  env.store = {
+    's:sess-1': {
+      unit: 'k', pending: { path: 'C:/Users/tester/.claude/handoffs/autohandoff-old.md', startedAt: 999_000, writeTurnId: 'w', held: ['старое сообщение'], ctx: 200 },
+      askAt: 250, isArmed: false, armBelow: 150, isOff: false, checkedAt: 0, quietBelow: 0, lastTurn: null, times: [], at: 999_000,
+    },
+  }
+  env.written = 1_000_000
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await clock.advance(3_000)
+  await clock.settle()
+  expect(env.submits).toContain('старое сообщение')
+})
+
+test('отсчёт на паузе: событие с 250 тыс. передачу не запускает и идёт в эту сессию', async ($, on) => {
+  const env = fresh()
+  env.k = 260
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await finishTask($, 't1')
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'pause' })
+  const r = await $.prompt.submit(peer('Подпроект: остановлен') as never)
+  await clock.settle()
+  expect('drop' in (r as any)).toBe(false)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await ui.unmount()
+})
+
+test('во время передачи: нажатие кнопки — как сообщение пользователя, неизвестное — без пометки «от другой сессии»', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.command.run({ command: 'autohandoff', args: 'now' } as never)
+  await clock.settle()
+  const held = (text: string, kind: string) => $.prompt.submit({ text, wait: false, origin: { kind } } as never)
+  expect(typeof ((await held('Да, слить', 'auto-continuation')) as any).drop).toBe('string')
+  expect(typeof ((await held('Напоминание', 'scheduled-trigger')) as any).drop).toBe('string')
+  expect(typeof ((await held('Глобальная: пауза', 'peer')) as any).drop).toBe('string')
+  await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.submits).toContain('Да, слить')
+  const other = env.submits.find(t => t.endsWith('Напоминание')) ?? ''
+  expect(other).toContain('пока шла автопередача')
+  expect(other).not.toContain('от другой сессии')
+  expect(env.submits.find(t => t.endsWith('Глобальная: пауза')) ?? '').toContain('от другой сессии')
 })

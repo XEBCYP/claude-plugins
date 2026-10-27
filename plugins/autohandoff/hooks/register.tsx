@@ -25,17 +25,29 @@ import type { Band } from '../types'
 // приложения стартует с isInteractive false, как -p и SDK, и отличается от них переменной CLAUDE_CODE_ENTRYPOINT.
 // «Отменить» — снова не раньше +`askStep` (50 тыс., в глобальной — `globalAskStep`, 30 тыс.). Последний ответ
 // с экрана пропадёт — новая сессия начнёт с его пересказа и заново задаст открытый вопрос окном.
+// Пакет 3 аудита 27.10 (ADR 0015): жёсткий предел `hard` (300 тыс.) — после действия основного цикла мод сам
+// заканчивает ход и передаёт (R50 25.10 дошёл до ~860 тыс. — ход не кончался); сообщения других сессий и служебные
+// события, пришедшие во время передачи или с `to` и выше, придерживаются и уходят в чистую сессию после документа
+// (раньше событие сбрасывало отсчёт, и передача не наступала, а сообщение глобальной терялось); в сессии подпроекта
+// (её папку называет реестр глобального проекта) — передача без отсчёта: за ней никто не смотрит; с `steps` действий
+// за ход — напоминание довести шаг и закончить ход, дальше через каждые `stepsEvery`.
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
+
+// Придержанное сообщение: пользователя — уйдёт от его имени; другой сессии или событие — как сообщение плагина
+// isSession — от другой сессии (пометка при пересылке в чистую сессию)
+type Held = { text: string; isUser: boolean; isSession?: boolean }
 
 type Pending = {
   path: string
   startedAt: number
   // Ход, который пишет документ: первый ход основного цикла после начала передачи
   writeTurnId: string | null
-  // Сообщения пользователя, которые уйдут в чистую сессию после документа
-  held: string[]
+  // Сообщения, которые уйдут в чистую сессию после документа (в отметке до 2.3.0 — строки: сообщения пользователя)
+  held: (Held | string)[]
+  // Ход прерван жёстким пределом: документ должен записать, на каком шаге остановились
+  isCut?: boolean
   // Контекст в начале передачи, тыс. токенов: от него считается, когда снова включаться в чистой сессии
   ctx: number
 }
@@ -112,6 +124,10 @@ const IDLE_PROMPT = `Служебный вопрос мода автоперед
 НЕТ — во всех остальных случаях, в том числе если сомневаешься.
 Ответь одним словом: ДА или НЕТ.`
 
+const STEPS_NUDGE = `Автопередача: в этом ходе уже {n} действий. Каждое действие заново читает весь контекст ({ctx} тыс.
+токенов). Доведи текущий шаг до точки, где ничего не держится только в памяти разговора, запиши сделанное и что осталось
+и закончи ход коротким итогом; большие чтения и длинные логи отдай субагенту.`
+
 const NUDGE = `Автопередача: контекст {ctx} тыс. токенов — выше порога {to} тыс., и каждое действие заново читает
 весь контекст. Передать работу в чистую сессию можно только в конце хода. Доведи текущий шаг до точки, где ничего
 не держится только в памяти разговора: запиши сделанное и что осталось (коммит — если в задаче так принято). Новых больших чтений и
@@ -128,6 +144,13 @@ let from = usual.from
 let to = usual.to
 let askStep = usual.askStep
 let isGlobal = false
+// Жёсткий предел, тыс. токенов: после действия основного цикла ход заканчивает сам мод
+let hard = 300
+// Напоминание о длине хода: с `steps` действий, затем через каждые `stepsEvery`
+let steps = 60
+let stepsEvery = 30
+// Сессия подпроекта: её папку называет реестр глобального проекта — передача без отсчёта
+let isSub = false
 let perHour = 2
 // Секунд отсчёта на полосе
 let countdown = 15
@@ -153,6 +176,10 @@ let turnWrap: LastTurn['wrap'] = 'none'
 let nudgeAt = 0
 // Откуда пришло последнее сообщение не от плагина — для /autohandoff status
 let lastOrigin = ''
+// Ход основного цикла, который идёт сейчас, и сколько в нём действий
+let turnNow = ''
+let stepCount = 0
+let stepsAt = 0
 
 function freshMark(): Mark {
   return {
@@ -220,8 +247,50 @@ async function chooseLimits($: Dollar, cwd: string): Promise<void> {
   ;({ from, to, askStep } = isGlobal ? global : usual)
 }
 
-async function resubmit($: Dollar, texts: string[]): Promise<void> {
-  for (const text of texts) await $.prompt.submit({ text, asUser: true })
+// Подпроект — папка, которую реестр глобального проекта (docs/Подпроекты.md в соседней папке) называет в строке
+// «**Где:** `путь`» (как в sreda)
+const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
+const normPath = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
+
+async function isSubproject($: Dollar, raw: string): Promise<boolean> {
+  const cwd = normPath(raw)
+  const cut = cwd.lastIndexOf('/')
+  if (!cwd || cut <= 0) return false
+  const parent = cwd.slice(0, cut)
+  const entries = await $.fs.list(parent).catch(() => [] as { name: string; kind: string }[])
+  for (const one of entries) {
+    if (one.kind !== 'dir' || normPath(`${parent}/${one.name}`) === cwd) continue
+    const text = await $.fs.read(`${parent}/${one.name}/${GLOBAL_MARKER}`).catch(() => '')
+    for (const m of String(text).matchAll(WHERE)) {
+      const where = normPath(m[1])
+      if (cwd === where || cwd.startsWith(`${where}/`)) return true
+    }
+  }
+  return false
+}
+
+const asHeld = (one: Held | string): Held => (typeof one === 'string' ? { text: one, isUser: true } : one)
+
+// Откуда сообщения, которые помечаются «от другой сессии»: сообщения сессий, уведомления фоновых задач, отчёты сессий,
+// запущенных этой (<side-sessions-event>). Остальные (нажатие кнопки, канал, расписание, неизвестные) — без этой пометки
+const SESSION_ORIGINS = new Set(['peer', 'peer-send-message', 'projects-relay', 'coordinator', 'task-notification'])
+const SESSION_NOTE = 'Сообщение от другой сессии пришло, пока шла автопередача в чистый контекст:\n\n'
+const OTHER_NOTE = 'Сообщение пришло, пока шла автопередача в чистый контекст:\n\n'
+
+// Пришедшее не от пользователя — с пометкой, откуда оно; продолжение действия пользователя (нажатие кнопки) — как его
+// сообщение
+function heldOf(e: any): Held {
+  const text = String(e.text ?? '')
+  const kind = String(e.origin?.kind ?? '')
+  if (kind === 'auto-continuation') return { text, isUser: true }
+  return SESSION_ORIGINS.has(kind) || text.includes('<side-sessions-event>') ? { text, isUser: false, isSession: true } : { text, isUser: false }
+}
+
+async function resubmit($: Dollar, items: (Held | string)[]): Promise<void> {
+  for (const one of items.map(asHeld)) {
+    if (one.isUser) await $.prompt.submit({ text: one.text, asUser: true })
+    else await $.prompt.submit({ text: (one.isSession ? SESSION_NOTE : OTHER_NOTE) + one.text })
+  }
 }
 
 // Куда Claude запишет документ: ~/.claude/handoffs/, вне проекта
@@ -234,17 +303,25 @@ async function handoffPath($: Dollar): Promise<string> {
 }
 
 // Шаг 1: Claude пишет документ передачи; шаг 2 — в turn.complete хода записи
-async function startHandoff($: Dollar, held: string[], ctx: number): Promise<void> {
+async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false): Promise<void> {
   if (mark.pending) return
   const path = await handoffPath($)
-  mark = { ...mark, isArmed: false, pending: { path, startedAt: await $.clock.now(), writeTurnId: null, held, ctx } }
+  mark = { ...mark, isArmed: false, pending: { path, startedAt: await $.clock.now(), writeTurnId: null, held, ctx, isCut } }
   await save($)
   await noteTime($)
   // Если ход записи так и не начался, отмена по времени не должна ждать следующего хода
   void $.clock.after(WAIT_MS + 1000, () => void checkPending($, null))
-  const next = held.length
-    ? `\n\nСледующая сессия начнёт с этого сообщения пользователя — построй документ под него, но сейчас его НЕ выполняй:\n<<<\n${held.join('\n\n')}\n>>>`
+  const users = held.filter(one => one.isUser).map(one => one.text)
+  const others = held.filter(one => !one.isUser).map(one => one.text)
+  let next = users.length
+    ? `\n\nСледующая сессия начнёт с этого сообщения пользователя — построй документ под него, но сейчас его НЕ выполняй:\n<<<\n${users.join('\n\n')}\n>>>`
     : '\n\nПользователь мог не прочитать последний ответ: запиши в документ итог последней задачи коротко и вопрос, который ему задан в конце (итоговое окно или окно вопроса), дословно с вариантами — если был.'
+  if (others.length) {
+    next += `\n\nПришли сообщения от других сессий или служебные — чистая сессия получит их следом за документом; сейчас их НЕ выполняй, но учти в документе (кого ждём, что пришло):\n<<<\n${others.join('\n\n')}\n>>>`
+  }
+  if (isCut) {
+    next += `\n\nХод прерван автопередачей посреди работы: контекст ${Math.round(ctx)} тыс. токенов — выше жёсткого предела ${hard} тыс. Запиши в документ, на каком шаге остановились, что было в работе и не закончено (команды, копирования, выкладки — проверить, чем кончились) и с чего продолжить.`
+  }
   try {
     await $.command.run({ command: 'autohandoff:write', args: `Сохрани документ в файл ${path}.${next}` })
   } catch (err: any) {
@@ -280,18 +357,23 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
     cliId = await $.session.id()
     mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times }
     await save($)
-    if (p.held.length) {
+    const held = p.held.map(asHeld)
+    if (held.some(one => one.isUser)) {
       await $.prompt.submit({
         text: `Прочитай ${p.path} — это документ передачи работы из прошлой сессии (автопередача по заполнению контекста). Сейчас ничего не делай и ответь одной строкой, что прочитал: следующее сообщение пользователя придёт сразу за этим.`,
       })
-      for (const text of p.held) {
-        await $.prompt.submit({ text, asUser: true })
+      for (const one of held) {
+        await resubmit($, [one])
         sent += 1
       }
     } else {
       await $.prompt.submit({
-        text: `Прочитай ${p.path} — это документ передачи работы из прошлой сессии (автопередача по заполнению контекста; пользователь мог не видеть последний ответ). Если документ говорит, что эта сессия — подпроект глобального проекта, пользователю сама не пиши и не спрашивай: пересказ, вопросы и команды для него отправь сообщением в глобальную сессию (её id — в документе), команду — целиком. Иначе начни с короткого пересказа для пользователя: итог прошлой задачи и что сделано; если в документе есть открытый вопрос к пользователю — задай его окном AskUserQuestion. Затем продолжай работу, если она не ждёт его ответа.`,
+        text: `Прочитай ${p.path} — это документ передачи работы из прошлой сессии (автопередача по заполнению контекста; пользователь мог не видеть последний ответ). Если документ говорит, что эта сессия — подпроект глобального проекта, пользователю сама не пиши и не спрашивай: пересказ, вопросы и команды для него отправь сообщением в глобальную сессию (её id — в документе), команду — целиком. Иначе начни с короткого пересказа для пользователя: итог прошлой задачи и что сделано; если в документе есть открытый вопрос к пользователю — задай его окном AskUserQuestion. Затем продолжай работу, если она не ждёт его ответа.${held.length ? ' Следом придут сообщения, пришедшие во время передачи, — учти их.' : ''}`,
       })
+      for (const one of held) {
+        await resubmit($, [one])
+        sent += 1
+      }
     }
   } catch (err: any) {
     $.ui.toast(`Передача не дошла до конца: ${String(err?.message ?? err).slice(0, 80)}. Документ — ${p.path}`)
@@ -341,7 +423,7 @@ function tick($: Dollar, gen: number): void {
 }
 
 // «Передать» или конец отсчёта; held — сообщения пользователя, набранные при полосе
-async function handoffNow($: Dollar, held: string[] = []): Promise<void> {
+async function handoffNow($: Dollar, held: Held[] = []): Promise<void> {
   const b = bandNow
   if (!b) return
   countGen += 1
@@ -397,7 +479,9 @@ async function afterTurn($: Dollar, isAborted: boolean): Promise<void> {
   }
   // Пока шла проверка, пользователь написал или начался другой ход — момент уже не тот
   if (isTurnRunning || isChecking || mark.pending || bandNow) return
-  await startCountdown($, ctx, isDue)
+  // Подпроект: за сессией никто не смотрит — отсчёт только задержал бы передачу, и его снимало бы каждое событие
+  if (isSub) void startHandoff($, [], ctx)
+  else await startCountdown($, ctx, isDue)
 }
 
 // $.model.fork без своего предела времени: не дольше FORK_MS, иначе — «не сейчас»
@@ -451,7 +535,9 @@ async function commandText($: Dollar, raw: string): Promise<string> {
   const wraps = { none: 'не было', clean: 'было, без вопроса', ask: 'было, с вопросом' }
   const last = mark.lastTurn
   const turn = last ? ` Прошлый ход: ${last.isAborted ? 'прерван' : 'закончен'}, итоговое окно — ${wraps[last.wrap]}.` : ''
-  const kind = isGlobal ? ' Сессия глобального проекта — свои пороги.' : ''
+  const kind = (isGlobal ? ' Сессия глобального проекта — свои пороги.' : '') +
+    (isSub ? ' Сессия подпроекта — передача без отсчёта.' : '') +
+    ` Жёсткий предел — ${hard} тыс.: ход заканчивается сам.`
   return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times} из ${perHour}.${origin}${turn}`
 }
 
@@ -475,15 +561,15 @@ async function tryHandoff($: Dollar, text: string): Promise<string | null> {
     if (extra.length) void resubmit($, extra)
     return null
   }
-  void startHandoff($, [text, ...extra], ctx)
+  void startHandoff($, [text, ...extra].map(one => ({ text: one, isUser: true })), ctx)
   $.ui.toast(`Контекст ${Math.round(ctx)} тыс. токенов: задача закончена — передаю работу в чистый контекст`)
   return `Контекст ${Math.round(ctx)} тыс. токенов, задача закончена: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само. Выключить автопередачу для этой сессии — /autohandoff off.`
 }
 
-async function holdDuringHandoff($: Dollar, text: string): Promise<string> {
+async function holdDuringHandoff($: Dollar, text: string, isUser = true, from?: Held): Promise<string> {
   const p = mark.pending
   if (p) {
-    mark = { ...mark, pending: { ...p, held: [...p.held, text] } }
+    mark = { ...mark, pending: { ...p, held: [...p.held, from ?? { text, isUser }] } }
     await save($)
   }
   return 'Идёт передача в чистый контекст — это сообщение уйдёт туда сразу после документа передачи.'
@@ -502,6 +588,9 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
   turnWrap = 'none'
   isTurnRunning = true
   nudgeAt = 0
+  turnNow = turnId
+  stepCount = 0
+  stepsAt = steps
   // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода
   await cancelCountdown($, true)
   // Команда передачи стоит в очереди: первый ход основного цикла после её начала — ход записи документа
@@ -536,6 +625,61 @@ async function onMeasure($: Dollar, ctx: number): Promise<void> {
   }
 }
 
+// Напоминание о длине хода: с `steps` действий основного цикла, затем через каждые `stepsEvery`
+async function stepsText($: Dollar): Promise<string | null> {
+  if (!isTurnRunning || mark.pending || mark.isOff) return null
+  stepCount += 1
+  if (stepCount < stepsAt) return null
+  stepsAt = stepCount + stepsEvery
+  return STEPS_NUDGE.replace('{n}', String(stepCount)).replace('{ctx}', String(Math.round(await contextK($))))
+}
+
+// Жёсткий предел: после действия основного цикла — закончить ход и передать. Не посреди работы субагентов и не сверх
+// лимита попыток в час (тогда — только напоминания)
+async function cutTurn($: Dollar): Promise<string | null> {
+  if (!isPersonal || !isTurnRunning || !turnNow || mark.pending || mark.isOff || !mark.isArmed) return null
+  const ctx = await contextK($)
+  if (ctx < hard) return null
+  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return null
+  const turnId = turnNow
+  turnNow = ''
+  // Не ждём: ход, который держит этот хук, заканчивается его же отменой
+  void (async () => {
+    await $.turn.abort({ turnId }).catch(() => undefined)
+    await startHandoff($, [], ctx, true)
+  })()
+  $.ui.toast(`Контекст ${Math.round(ctx)} тыс. токенов — выше предела ${hard} тыс.: ход закончен, передаю работу в чистый контекст`)
+  return `Автопередача: контекст ${Math.round(ctx)} тыс. токенов — выше жёсткого предела ${hard} тыс. Ход заканчивается сейчас; новых действий не начинай — дальше документ передачи.`
+}
+
+// Сообщение другой сессии или служебное событие с `to` и выше, когда ход не идёт: передача, само сообщение — следом
+async function eventDue($: Dollar): Promise<number | null> {
+  if (!isPersonal || isTurnRunning || mark.pending || mark.isOff || !mark.isArmed || isChecking || isIdleChecking) return null
+  const ctx = await contextK($)
+  if (ctx < to || ctx < mark.askAt || ctx < mark.quietBelow) return null
+  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return null
+  return ctx
+}
+
+// Не от пользователя и не от плагина: сообщение другой сессии, уведомление, событие приложения
+async function onOtherSubmit($: Dollar, e: any): Promise<string | null> {
+  if (e.command || e.attachments?.length) return null
+  if (mark.pending) return holdDuringHandoff($, e.text, false, heldOf(e))
+  // Доставка внутрь идущего хода — не трогаем
+  if (e.turnId) return null
+  const held = [heldOf(e)]
+  if (bandNow) {
+    // Отсчёт пользователь поставил на паузу — он читает экран: событие его не прерывает и идёт в эту сессию
+    if (!bandNow.isDue || bandNow.isPaused) return null
+    await handoffNow($, held)
+    return 'Идёт передача в чистый контекст — это сообщение уйдёт туда сразу после документа передачи.'
+  }
+  const ctx = await eventDue($)
+  if (ctx === null) return null
+  void startHandoff($, held, ctx)
+  return `Контекст ${Math.round(ctx)} тыс. токенов: сначала передача в чистый контекст, это сообщение уйдёт туда сразу после документа.`
+}
+
 // Пользователь написал при полосе — момент уже проверен: передаём с его сообщением
 async function submitDuringBand($: Dollar, text: string): Promise<string | null> {
   const b = bandNow
@@ -545,7 +689,7 @@ async function submitDuringBand($: Dollar, text: string): Promise<string | null>
     await cancelCountdown($, true)
     return null
   }
-  await handoffNow($, [text])
+  await handoffNow($, [{ text, isUser: true }])
   return `Контекст ${b.ctx} тыс. токенов: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само.`
 }
 
@@ -555,6 +699,9 @@ export const register: Register = (on, options) => {
   global = limits(options, 'global', { from: 150, to: 200, askStep: 30 })
   ;({ from, to, askStep } = usual)
   perHour = num(options.perHour, 2)
+  hard = Math.max(num(options.hard, 300), usual.to, global.to)
+  steps = Math.max(1, Math.round(num(options.steps, 60)))
+  stepsEvery = Math.max(1, Math.round(num(options.stepsEvery, 30)))
   countdown = Math.max(1, Math.round(num(options.countdown, 15)))
   mark = freshMark()
 
@@ -571,6 +718,7 @@ export const register: Register = (on, options) => {
       )
     }
     await chooseLimits($, e.cwd ?? '')
+    isSub = await isSubproject($, e.cwd ?? '').catch(() => false)
     await loadMark($)
     // Перезагрузка плагина: atom полосы живёт дольше переменных модуля — без этого полоса висела бы с мёртвыми кнопками
     await setBand($, null)
@@ -594,9 +742,13 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId || e.tool === WRAP_UP || r.deny !== undefined || r.isError) return r
-    const text = await nudgeText($)
-    return text ? { ...r, context: [...(r.context ?? []), text] } : r
+    if (e.agentId || e.tool === WRAP_UP) return r
+    const cut = await cutTurn($)
+    if (cut) return { ...r, context: [...(r.context ?? []), cut] }
+    const notes = [r.deny === undefined && !r.isError ? await nudgeText($) : null, await stepsText($)].filter(
+      (one): one is string => !!one,
+    )
+    return notes.length ? { ...r, context: [...(r.context ?? []), ...notes] } : r
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -607,7 +759,11 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind !== 'plugin') lastOrigin = e.origin.kind
     const isUser = USER_ORIGINS.has(e.origin.kind) && !e.command && !e.isMeta
-    if (!isUser) return next(e)
+    if (!isUser) {
+      // Сообщения других сессий и события: во время передачи и с `to` — в чистую сессию следом за документом
+      const reason = e.origin.kind === 'plugin' || e.isMeta ? null : await onOtherSubmit($, e)
+      return reason === null ? next(e) : { drop: reason }
+    }
 
     // Передача идёт: сообщение уйдёт в чистую сессию вслед за документом; картинки так не переслать — просим позже
     if (mark.pending) {
