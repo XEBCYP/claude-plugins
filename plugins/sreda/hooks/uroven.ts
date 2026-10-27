@@ -1,5 +1,5 @@
-// Автоматический уровень усилий (плагин sreda, ADR 0011). Диапазон пользователя: Sonnet 5.5 и Opus 5.5 с низким,
-// средним, высоким уровнем — без Haiku, Fable, «сверхвысокого» и «максимума».
+// Автоматический уровень усилий (плагин sreda, ADR 0011, 0013). Диапазон пользователя: только Opus 5.5 со средним,
+// высоким и сверхвысоким уровнем — без Sonnet, Haiku, Fable, «низкого» и «максимума».
 //
 // Своя сессия: сменить себе уровень инструментом приложения нельзя, а мод подменяет effort у каждого запроса к модели
 // (turn.step). В начале хода уровень ставит бесплатная оценка сообщения пользователя, по ходу — сама сессия
@@ -7,22 +7,21 @@
 // понижение — только пока переписка короткая. Модель сессии не меняется никогда: кэш привязан к модели.
 // Агенты и подпроекты: модель и уровень выправляются в рамки на вызове инструмента; слепая проверка — Opus высокий.
 //
-// Ручной режим (ADR 0012): уровень основной сессии ставит пользователь, мод его не трогает и не режет до «высокого».
+// Ручной режим (ADR 0012): уровень основной сессии ставит пользователь, мод его не трогает и не держит в рамках.
 // Включается файлом проекта .claude/sreda.json `{"uroven": "ручной"}` (пишет команда /uroven ручной | авто) или сам —
 // когда пользователь сменил уровень в программе посреди сессии (e.effort запроса — настройка сессии, не наша подмена).
 
 import { showEffort } from './stroka'
 
-export type Level = 'low' | 'medium' | 'high'
+export type Level = 'medium' | 'high' | 'xhigh'
 
-const NAMES: Record<Level, string> = { low: 'низкий', medium: 'средний', high: 'высокий' }
-const ALL_NAMES: Record<string, string> = { ...NAMES, xhigh: 'сверхвысокий', max: 'максимум' }
+const NAMES: Record<Level, string> = { medium: 'средний', high: 'высокий', xhigh: 'сверхвысокий' }
+const ALL_NAMES: Record<string, string> = { ...NAMES, low: 'низкий', max: 'максимум' }
 const PROJECT_FILE = '.claude/sreda.json'
-const RANK: Record<Level, number> = { low: 0, medium: 1, high: 2 }
+const RANK: Record<Level, number> = { medium: 0, high: 1, xhigh: 2 }
 // До стольких токенов переписки оценка понижает уровень сразу: сброс кэша ещё дешевле разницы в уровнях. Дальше —
 // только если и следующее сообщение просит ниже (разовая простая просьба посреди сложной работы кэш не сбрасывает).
 export const LOWER_UNTIL = 40_000
-const SONNET = 'claude-sonnet-5-5'
 const OPUS = 'claude-opus-5-5'
 
 let level: Level = 'medium'
@@ -37,10 +36,11 @@ let picked: unknown
 // Модель прошлого запроса: при смене модели (запасная, /model) уровень по умолчанию другой — это не выбор уровня
 let lastModel: unknown
 
-// Самый высокий уровень — «высокий»: xhigh и max пользователь не берёт
+// Диапазон — от «среднего» до «сверхвысокого»: low и max пользователь не берёт
 export function clamp(effort: unknown): Level | undefined {
-  if (effort === 'low' || effort === 'medium' || effort === 'high') return effort
-  if (effort === 'xhigh' || effort === 'max') return 'high'
+  if (effort === 'medium' || effort === 'high' || effort === 'xhigh') return effort
+  if (effort === 'low') return 'medium'
+  if (effort === 'max') return 'xhigh'
   return undefined
 }
 
@@ -48,30 +48,33 @@ export function clamp(effort: unknown): Level | undefined {
 const W = '(?<![а-яёa-z])'
 const HARD = new RegExp(
   `${W}(ошибк|ошибоч|не работа|не сход|расхожд|почему|разбер|пада[еюл]|упал|слома|баги?(?![а-яё])|глюч|` +
-  `ещё раз|еще раз|снова|опять|не помогл|не получ|архитектур|спроектир|варианты|вариантов|сравни|слеп[аоуы][яюйе]|` +
+  `ещё раз|еще раз|снова|опять|не получ|архитектур|спроектир|варианты|вариантов|сравни|слеп[аоуы][яюйе]|` +
   `ADR|bug|error|fail|debug|why|mismatch|investigat|root cause|design|refactor)`,
   'iu',
 )
+// Прошлая попытка не помогла — отдельный признак, не пересекается с HARD: для «сверхвысокого» нужен ещё один
+const REPEAT = new RegExp(`${W}(не помогл|вс[её] е[щш][её] не|до сих пор не|по-прежнему не|still not|still fail|` +
+  `didn['’]t help)`, 'iu')
 const EASY = /^(да|ок|ok|нет|ага|давай|продолжай|продолжи|согласен|готово|спасибо|хорошо|ладно)(?![а-яёa-z])/iu
-const MECHANICAL = new RegExp(`${W}(закоммит|отправ|перешли|скопируй|покажи|выведи|найди|статус|список|выгрузи|` +
-  `перезапуст|commit|push|copy|list|show|status|collect|fetch)`, 'iu')
 // Не задача пользователя: ответ из панели, документ передачи, события приложения и других сессий
 const NOT_TASK = /^(Ответ на вопрос «|Прочитай \S+ — это документ передачи|<)/u
 // Задание подпроекту от глобальной: первая строка «Effort: high» — уровень задан прямо
-const ORDERED = /^\s*Effort:\s*(low|medium|high)\b/im
+const ORDERED = /^\s*Effort:\s*(low|medium|high|xhigh|max)\b/im
 
-// Бесплатная оценка сообщения: объём, число вопросов и пунктов, слова о поиске ошибок и решениях, механика.
+// Бесплатная оценка сообщения: объём, число вопросов и пунктов, слова о поиске ошибок, решениях и неудачной попытке.
+// Один признак сложности — «высокий», два и больше — «сверхвысокий»; без признаков — «средний» (механика тоже).
 // undefined — сообщение ничего не говорит о сложности (короткий ответ посреди работы): уровень не трогаем.
 export function judge(text: string): Level | undefined {
   const t = text.trim()
   if (!t || NOT_TASK.test(t)) return undefined
   const ordered = ORDERED.exec(t)
-  if (ordered) return ordered[1].toLowerCase() as Level
+  if (ordered) return clamp(ordered[1].toLowerCase())
   const questions = (t.match(/\?/g) ?? []).length
   const items = (t.match(/^\s*(\d+[.)]|[-*•])\s/gm) ?? []).length
-  if (t.length > 1500 || questions >= 3 || items >= 4 || HARD.test(t)) return 'high'
+  const signs = [t.length > 1500, questions >= 3, items >= 4, HARD.test(t), REPEAT.test(t)].filter(Boolean).length
+  if (signs >= 2) return 'xhigh'
+  if (signs === 1) return 'high'
   if (t.length < 200 && questions === 0 && EASY.test(t)) return undefined
-  if (t.length < 300 && MECHANICAL.test(t)) return 'low'
   return 'medium'
 }
 
@@ -114,15 +117,13 @@ function blind(e: any): boolean {
     .test(`${e.description ?? ''} ${e.prompt ?? ''}`)
 }
 
-// Модель агента или подпроекта — в рамках: Haiku → Sonnet, Fable → Opus. Агенту — псевдоним, сессии — полный id.
+// Модель агента или подпроекта — всегда Opus 5.5 (Sonnet, Haiku, Fable → Opus). Агенту — псевдоним, сессии — полный id.
 function model(m: unknown, forSession: boolean): string | undefined {
   if (m === undefined) return undefined
   const s = String(m)
-  if (/haiku/i.test(s)) return forSession ? SONNET : 'sonnet'
-  if (/fable|mythos/i.test(s)) return forSession ? OPUS : 'opus'
-  if (forSession && s === 'sonnet') return SONNET
   if (forSession && s === 'opus') return OPUS
-  return s
+  if (/opus/i.test(s)) return s
+  return forSession ? OPUS : 'opus'
 }
 function tidy<T extends Record<string, unknown>>(e: T): T {
   const out: Record<string, unknown> = { ...e }
@@ -207,15 +208,16 @@ export async function startUroven($: any): Promise<void> {
   const reg = await $.tool.register({
     name: 'uroven',
     description:
-      'Уровень усилий этой сессии (Opus 5.5), когда прочитана задача и оценка мода в начале хода не подходит: low — ' +
-      'механика (коммит, пересылка, поиск данных, простой тест); medium — обычная работа; high — поиск ошибок, ' +
-      'расхождения цифр, код на много файлов, решения и варианты, вторая неудачная попытка, много требований. ' +
-      'Действует с этого же шага, пока оценка следующего сообщения пользователя не выберет другой. Смена уровня ' +
-      'сбрасывает кэш переписки: на длинной понижать, только если впереди несколько простых шагов. Не выше high.',
+      'Уровень усилий этой сессии (Opus 5.5), когда прочитана задача и оценка мода в начале хода не подходит: ' +
+      'medium — механика и обычная работа; high — поиск ошибок, расхождения цифр, код на много файлов, решения и ' +
+      'варианты, много требований; xhigh — то же, но трудное: вторая неудачная попытка, ошибка без явной причины, ' +
+      'архитектура на много частей, много связанных требований сразу. Действует с этого же шага, пока оценка ' +
+      'следующего сообщения пользователя не выберет другой. Смена уровня сбрасывает кэш переписки: на длинной ' +
+      'понижать, только если впереди несколько простых шагов. Не ниже medium и не выше xhigh.',
     inputSchema: {
       type: 'object',
       properties: {
-        level: { type: 'string', enum: ['low', 'medium', 'high'] },
+        level: { type: 'string', enum: ['medium', 'high', 'xhigh'] },
         reason: { type: 'string' },
       },
       required: ['level'],
@@ -246,19 +248,21 @@ export function urovenCall($: any, e: any, next: any): Promise<any> | undefined 
     if (e.agentId !== undefined) return Promise.resolve({ result: 'Уровень меняет только основная сессия.' })
     if (manual) return Promise.resolve({ result: 'Уровень ставит пользователь (ручной режим) — не менять.' })
     const asked = clamp(e.level)
-    if (!asked) return Promise.resolve({ result: 'level: low, medium или high.' })
+    if (!asked) return Promise.resolve({ result: 'level: medium, high или xhigh.' })
     return Promise.resolve({ result: set($, asked) })
   }
   if (next.origin.plugin !== 'engine') return undefined
 
   if (e.tool === 'Agent') {
     if (blind(e)) return next({ ...e, model: 'opus', effort: 'high' })
-    // Поиск по проекту без указанной модели шёл бы на Haiku — Sonnet
-    const m = model(e.model, false) ?? (e.subagent_type === 'Explore' ? 'sonnet' : undefined)
+    // Поиск по проекту без указанной модели шёл бы на Haiku — Opus
+    const m = model(e.model, false) ?? (e.subagent_type === 'Explore' ? 'opus' : undefined)
     return next(tidy({ ...e, model: m, effort: effortOf(e) }))
   }
   if (SESSION_TOOLS.test(e.tool)) {
-    return next(tidy({ ...e, model: model(e.model, true), effort: effortOf(e) }))
+    // Новая сессия без модели унаследовала бы модель этой (запасную, выбранную /model) — Opus явно
+    const m = e.model === undefined && /start_session$/.test(e.tool) ? OPUS : model(e.model, true)
+    return next(tidy({ ...e, model: m, effort: effortOf(e) }))
   }
   return undefined
 }
@@ -275,8 +279,8 @@ export function registerUroven(on: any, started: () => void = () => {}): void {
     return next(e)
   })
 
-  // Каждый запрос к модели: своей сессии — выбранный уровень (в ручном режиме — как есть); агентам — не выше высокого
-  // и не Haiku/Fable (их модель могла прийти из описания агента или настройки по умолчанию, мимо вызова Agent)
+  // Каждый запрос к модели: своей сессии — выбранный уровень (в ручном режиме — как есть); агентам — Opus от среднего
+  // до сверхвысокого (их модель могла прийти из описания агента или настройки по умолчанию, мимо вызова Agent)
   on('turn.step', async function* ($: any, e: any, next: any) {
     if (e.agentId === undefined) {
       // Уровень в программе сменился с прошлого запроса — его выбрал пользователь: дальше не вмешиваемся
