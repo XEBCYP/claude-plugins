@@ -251,7 +251,7 @@ test('лимит в час считает и неудачные попытки',
   expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(2)
 })
 
-test('пользователь отошёл: в конце задачи полоса, через 5 с — передача без его сообщения', async ($, on) => {
+test('пользователь отошёл: в конце задачи полоса, через 15 с — передача без его сообщения', async ($, on) => {
   const env = fresh()
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
@@ -259,7 +259,7 @@ test('пользователь отошёл: в конце задачи поло
   expect(env.forks).toBe(1)
   const ui = await $.ui.mount(BAND)
 
-  await clock.advance(4000)
+  await clock.advance(14_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
   await clock.advance(1500)
   const write = env.commands.find(c => c.startsWith('autohandoff:write')) ?? ''
@@ -319,7 +319,7 @@ test('«Отменить» — полосы нет до +50 тыс.; с 250 ты
 
   env.k = 315
   await finishTask($, 't3')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
   expect(env.asks).toBe(0)
   await ui.unmount()
@@ -414,11 +414,11 @@ test('глобальная сессия (в папке реестр подпро
   // «Отменить» — снова через +30 тыс.
   env.k = 230
   await finishTask($, 't3')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
   env.k = 236
   await finishTask($, 't4')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
   expect(env.forks).toBe(1)
   await ui.unmount()
@@ -482,7 +482,7 @@ test('сессия приложения (isInteractive false, экрана не�
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
   await finishTask($, 't1')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
 })
 
@@ -493,7 +493,7 @@ test('попытки других сессий не тратят лимит эт
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
   await finishTask($, 't1')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
 })
 
@@ -514,7 +514,7 @@ test('лимит в час переходит в чистую сессию по�
   await measure($, 100)
   env.k = 300
   await finishTask($, 't2')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(1)
 })
 
@@ -526,7 +526,7 @@ test('запуск -p или SDK (isInteractive false, не приложение
   const clock = engine(on, env)
   await $.session.start({ cwd: '/', surface: null, isInteractive: false } as never)
   await finishTask($, 't1')
-  await clock.advance(6000)
+  await clock.advance(16_000)
   expect(env.forks).toBe(0)
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
 })
