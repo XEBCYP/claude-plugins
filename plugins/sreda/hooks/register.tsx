@@ -3,7 +3,7 @@ import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
-import { registerUroven, startUroven, urovenCall } from './uroven'
+import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
 
 // Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json, с кнопками. Вопрос
 // окна AskUserQuestion попадает в панель сам; ответ в окне сразу уносит его в архив, кнопка панели сразу отвечает
@@ -392,6 +392,12 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'zhdut-otveta', description: 'Открыть панель «Ждут ответа»' })
+    await $.command.register({
+      name: 'uroven',
+      description: 'Уровень усилий в этом проекте: ручной — ставите сами, авто — выбирает «Среда»',
+      argumentHint: 'ручной | авто',
+      immediate: true,
+    })
     const reg = await $.tool.register({
       name: 'otvecheno',
       description:
@@ -438,6 +444,7 @@ export const register: Register = on => {
     await showPane($)
     return { text: 'Панель «Ждут ответа» открыта.' }
   })
+  on('command.run', { command: 'uroven' }, async ($, e) => ({ text: await urovenCommand($, String(e.args ?? '')) }))
 
   // Имя инструмента движок даёт при регистрации — сверяем с ним, а не с догадкой
   on('tool.call', async ($, e: any, next) => {

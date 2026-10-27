@@ -6,12 +6,18 @@
 // инструментом `uroven`. Смена уровня сбрасывает кэш переписки (дорого на длинной), поэтому повышение — всегда,
 // понижение — только пока переписка короткая. Модель сессии не меняется никогда: кэш привязан к модели.
 // Агенты и подпроекты: модель и уровень выправляются в рамки на вызове инструмента; слепая проверка — Opus высокий.
+//
+// Ручной режим (ADR 0012): уровень основной сессии ставит пользователь, мод его не трогает и не режет до «высокого».
+// Включается файлом проекта .claude/sreda.json `{"uroven": "ручной"}` (пишет команда /uroven ручной | авто) или сам —
+// когда пользователь сменил уровень в программе посреди сессии (e.effort запроса — настройка сессии, не наша подмена).
 
 import { showEffort } from './stroka'
 
 export type Level = 'low' | 'medium' | 'high'
 
 const NAMES: Record<Level, string> = { low: 'низкий', medium: 'средний', high: 'высокий' }
+const ALL_NAMES: Record<string, string> = { ...NAMES, xhigh: 'сверхвысокий', max: 'максимум' }
+const PROJECT_FILE = '.claude/sreda.json'
 const RANK: Record<Level, number> = { low: 0, medium: 1, high: 2 }
 // До стольких токенов переписки оценка понижает уровень сразу: сброс кэша ещё дешевле разницы в уровнях. Дальше —
 // только если и следующее сообщение просит ниже (разовая простая просьба посреди сложной работы кэш не сбрасывает).
@@ -24,6 +30,12 @@ let shown = ''
 let toolName = 'mcp__sreda__uroven'
 // Прошлая оценка просила ниже текущего уровня, но переписка была длинной
 let lowerAsked: Level | undefined
+// Ручной режим: 'project' — по файлу проекта, 'session' — пользователь сам сменил уровень в этой сессии
+let manual: 'project' | 'session' | undefined
+// Уровень, который выбран в программе (e.effort прошлого запроса основной сессии); его смена — выбор пользователя
+let picked: unknown
+// Модель прошлого запроса: при смене модели (запасная, /model) уровень по умолчанию другой — это не выбор уровня
+let lastModel: unknown
 
 // Самый высокий уровень — «высокий»: xhigh и max пользователь не берёт
 export function clamp(effort: unknown): Level | undefined {
@@ -73,7 +85,8 @@ async function context($: any): Promise<number> {
 
 // Своя часть строки под полем ввода — первой; токены и лимиты дописывает hooks/stroka.ts
 function show($: any): void {
-  const text = NAMES[level]
+  const own = ALL_NAMES[String(picked)]
+  const text = manual ? (own ? `вручную · ${own}` : 'вручную') : NAMES[level]
   if (text === shown) return
   shown = text
   void showEffort($, text)
@@ -119,6 +132,76 @@ function tidy<T extends Record<string, unknown>>(e: T): T {
 
 const SESSION_TOOLS = /^mcp__ccd_session(_mgmt)?__(start_session|set_session_effort|set_session_model)$/
 
+async function projectFile($: any): Promise<string> {
+  return `${String(await $.session.cwd()).split('\\').join('/').replace(/\/+$/, '')}/${PROJECT_FILE}`
+}
+
+// Файла нет — {}; файл есть, но не JSON-объект — undefined: команда его не перезаписывает (потеряли бы прочие ключи).
+// BOM в начале — PowerShell 5 пишет его при -Encoding UTF8.
+async function readProject($: any): Promise<Record<string, unknown> | undefined> {
+  const path = await projectFile($)
+  let text = ''
+  try {
+    if (!(await $.fs.exists(path))) return {}
+    text = String(await $.fs.read(path)).replace(/^﻿/, '')
+  } catch {
+    return {}
+  }
+  if (!text.trim()) return {}
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Ручной режим сессии и уровень программы — в состоянии сессии: перезагрузка плагина переменные модуля сбрасывает
+const SAVED = { plugin: 'sreda', key: 'uroven' } as const
+async function remember($: any): Promise<void> {
+  try {
+    await $.state.set(SAVED, { isSession: manual === 'session', picked: picked ?? null })
+  } catch {
+    // состояние недоступно — режим держится до перезагрузки плагина
+  }
+}
+
+// Уровень по умолчанию из настроек программы — точка отсчёта, если пользователь выбрал другой ещё до первого запроса
+async function configured($: any): Promise<unknown> {
+  try {
+    const row = (await $.config.list()).find((r: { key: string }) => /effort/i.test(r.key))
+    return typeof row?.value === 'string' && ALL_NAMES[row.value] ? row.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const isManual = (v: unknown) => /^(ручн|manual)/iu.test(String(v ?? ''))
+
+// /uroven ручной | авто — режим проекта в .claude/sreda.json (прочие ключи файла сохраняются); без слова — состояние
+export async function urovenCommand($: any, args: string): Promise<string> {
+  const word = args.trim().toLowerCase()
+  const where = PROJECT_FILE
+  if (!word) {
+    if (manual === 'project') return `Уровень ставите вы: ручной режим проекта (${where}). Вернуть — /uroven авто.`
+    if (manual === 'session') return 'Уровень ставите вы: вы сменили его в этой сессии. Вернуть — /uroven авто.'
+    return `Уровень выбирает «Среда»: сейчас ${NAMES[level]}. Ставить самому в этом проекте — /uroven ручной.`
+  }
+  const toManual = isManual(word)
+  if (!toManual && !/^(авто|auto)/u.test(word)) return 'Команда: /uroven ручной или /uroven авто.'
+  const data = await readProject($)
+  if (!data) return `${where} — не JSON-объект: файл не меняю, поправьте его (ключ "uroven": "ручной" или "авто").`
+  await $.fs.write(await projectFile($), `${JSON.stringify({ ...data, uroven: toManual ? 'ручной' : 'авто' }, null, 2)}\n`)
+  manual = toManual ? 'project' : undefined
+  lowerAsked = undefined
+  shown = ''
+  show($)
+  await remember($)
+  return toManual
+    ? `Ручной режим в этом проекте (${where}): уровень ставите вы в программе, «Среда» его не меняет.`
+    : `«Среда» снова выбирает уровень сама в этом проекте (${where}).`
+}
+
 // Из session.start плагина: инструмент `uroven` и уровень по умолчанию (новая сессия и перезагрузка плагина)
 export async function startUroven($: any): Promise<void> {
   const reg = await $.tool.register({
@@ -141,6 +224,15 @@ export async function startUroven($: any): Promise<void> {
   toolName = reg.tool
   level = 'medium'
   lowerAsked = undefined
+  lastModel = undefined
+  let saved: { isSession?: boolean; picked?: unknown } | undefined
+  try {
+    saved = (await $.state.get(SAVED)).value
+  } catch {
+    saved = undefined
+  }
+  picked = saved?.picked ?? (await configured($))
+  manual = isManual((await readProject($))?.uroven) ? 'project' : saved?.isSession ? 'session' : undefined
   shown = ''
   show($)
 }
@@ -152,6 +244,7 @@ export function urovenCall($: any, e: any, next: any): Promise<any> | undefined 
   if (e.tool === toolName) {
     // Уровень — основной сессии; агент его не меняет (переменная модуля общая)
     if (e.agentId !== undefined) return Promise.resolve({ result: 'Уровень меняет только основная сессия.' })
+    if (manual) return Promise.resolve({ result: 'Уровень ставит пользователь (ручной режим) — не менять.' })
     const asked = clamp(e.level)
     if (!asked) return Promise.resolve({ result: 'level: low, medium или high.' })
     return Promise.resolve({ result: set($, asked) })
@@ -176,16 +269,27 @@ export function registerUroven(on: any, started: () => void = () => {}): void {
   on('turn.start', async ($: any, e: any, next: any) => {
     if (e.agentId === undefined) {
       started()
-      const wanted = judge(String(e.text ?? ''))
+      const wanted = manual ? undefined : judge(String(e.text ?? ''))
       if (wanted) await guess($, wanted)
     }
     return next(e)
   })
 
-  // Каждый запрос к модели: своей сессии — выбранный уровень; агентам — не выше высокого и не Haiku/Fable (их модель
-  // могла прийти из описания агента или настройки по умолчанию, мимо вызова Agent)
+  // Каждый запрос к модели: своей сессии — выбранный уровень (в ручном режиме — как есть); агентам — не выше высокого
+  // и не Haiku/Fable (их модель могла прийти из описания агента или настройки по умолчанию, мимо вызова Agent)
   on('turn.step', async function* ($: any, e: any, next: any) {
     if (e.agentId === undefined) {
+      // Уровень в программе сменился с прошлого запроса — его выбрал пользователь: дальше не вмешиваемся
+      const sameModel = lastModel === undefined || e.model === lastModel
+      const changed = e.effort !== undefined && e.effort !== picked
+      if (changed && picked !== undefined && sameModel && !manual) manual = 'session'
+      if (e.effort !== undefined) picked = e.effort
+      lastModel = e.model
+      if (changed) await remember($)
+      if (manual) {
+        show($)
+        return yield* next(e)
+      }
       if (typeof e.effort !== 'string' || e.effort === level) return yield* next(e)
       return yield* next({ ...e, effort: level })
     }

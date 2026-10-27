@@ -27,6 +27,11 @@ export type Pending = {
 declare module 'claude-code' {
   interface PluginState {
     // picked — отмеченные в панели флажки: id вопроса → варианты
-    sreda: { items: Pending[]; picked: Record<string, string[]> }
+    // uroven — ручной режим этой сессии и уровень, выбранный в программе (hooks/uroven.ts): переживают перезагрузку
+    sreda: {
+      items: Pending[]
+      picked: Record<string, string[]>
+      uroven: { isSession: boolean; picked: string | number | null }
+    }
   }
 }
