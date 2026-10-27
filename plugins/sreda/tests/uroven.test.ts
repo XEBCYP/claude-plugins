@@ -61,7 +61,7 @@ async function step($: any, effort = 'medium', agentId?: string): Promise<void> 
   }
 }
 
-test('много вопросов и поиск ошибки — высокий уровень; короткое сообщение — низкий', async ($, on) => {
+test('поиск ошибки — высокий уровень; механика — средний, ниже не бывает', async ($, on) => {
   const env = await start($, on)
 
   await turn($, 'Почему не сходятся остатки по складу? Разберись и исправь.')
@@ -69,8 +69,36 @@ test('много вопросов и поиск ошибки — высокий 
   await turn($, 'Покажи список последних коммитов в ветке main.')
   await step($)
 
-  expect(env.efforts).toEqual(['high', 'low'])
-  expect(env.status.at(-1)?.startsWith('низкий · ')).toBe(true)
+  expect(env.efforts).toEqual(['high', 'medium'])
+  expect(env.status.at(-1)?.startsWith('средний · ')).toBe(true)
+})
+
+test('два признака сложности — сверхвысокий: ошибка и неудачная попытка, ошибка и много пунктов; «Effort: xhigh»', async ($, on) => {
+  const env = await start($, on)
+
+  await turn($, 'Остатки всё ещё не сходятся, прошлое исправление не помогло.')
+  await step($)
+  await turn($, 'Почему падает выгрузка:\n1. первый склад\n2. второй склад\n3. третий склад\n4. сводка')
+  await step($)
+  await turn($, 'Effort: xhigh\nDesign the sync between the two databases.')
+  await step($)
+
+  await turn($, 'Всё еще не работает выгрузка.')
+  await step($)
+
+  expect(env.efforts).toEqual(['xhigh', 'xhigh', 'xhigh', 'xhigh'])
+  expect(env.status.at(-1)?.startsWith('сверхвысокий · ')).toBe(true)
+})
+
+test('один признак — высокий, а не сверхвысокий: «не помогло» само по себе, «опять не забудь»', async ($, on) => {
+  const env = await start($, on)
+
+  await turn($, 'Не помогло.')
+  await step($)
+  await turn($, 'Опять не забудь закоммитить.')
+  await step($)
+
+  expect(env.efforts).toEqual(['high', 'high'])
 })
 
 test('короткое «да» посреди работы уровень не меняет', async ($, on) => {
@@ -92,7 +120,7 @@ test('на длинной переписке разовая простая пр�
   await turn($, 'Закоммить и отправь в GitHub.')
   await step($)
 
-  expect(env.efforts).toEqual(['high', 'low'])
+  expect(env.efforts).toEqual(['high', 'medium'])
 })
 
 test('не задача пользователя и похожие слова — уровень не скачет', async ($, on) => {
@@ -108,7 +136,7 @@ test('не задача пользователя и похожие слова �
   expect(env.efforts).toEqual(['medium', 'high'])
 })
 
-test('задание подпроекту: строка «Effort:» задаёт уровень, английские слова об ошибках — высокий', async ($, on) => {
+test('задание подпроекту: строка «Effort:» задаёт уровень (low — средний), английские слова об ошибках — высокий', async ($, on) => {
   const env = await start($, on)
 
   await turn($, 'Effort: low\nCollect the price list from the shared folder and send a summary.')
@@ -116,10 +144,10 @@ test('задание подпроекту: строка «Effort:» задаёт
   await turn($, 'Investigate why the export fails on the second run and fix the root cause.')
   await step($)
 
-  expect(env.efforts).toEqual(['low', 'high'])
+  expect(env.efforts).toEqual(['medium', 'high'])
 })
 
-test('агент не меняет уровень основной сессии; модель агента Haiku в запросе — Sonnet', async ($, on) => {
+test('агент не меняет уровень основной сессии; модель агента Haiku в запросе — Opus', async ($, on) => {
   const env = await start($, on)
 
   const r: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'low', agentId: 'a1' } as any)
@@ -131,33 +159,37 @@ test('агент не меняет уровень основной сессии;
 
   expect(String(r.result)).toContain('основная')
   expect(env.efforts[0]).toBe('medium')
-  expect(env.models).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5'])
+  expect(env.models).toEqual(['claude-opus-5-5', 'claude-opus-5-5'])
 })
 
-test('сессия сама поднимает уровень инструментом; выше высокого — нельзя', async ($, on) => {
+test('сессия сама меняет уровень инструментом: до сверхвысокого, не ниже среднего', async ($, on) => {
   const env = await start($, on)
 
-  const r: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'high', reason: 'вторая неудачная попытка' } as any)
+  const r: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'xhigh', reason: 'вторая неудачная попытка' } as any)
   await step($)
-  const bad: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'max' } as any)
+  const max: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'max' } as any)
+  await step($)
+  const low: any = await $.tool.call({ tool: 'mcp__sreda__uroven', level: 'low' } as any)
   await step($)
 
-  expect(String(r.result)).toContain('высокий')
-  expect(env.efforts).toEqual(['high', 'high'])
-  expect(String(bad.result)).toContain('высокий')
+  expect(String(r.result)).toContain('сверхвысокий')
+  expect(String(max.result)).toContain('сверхвысокий')
+  expect(String(low.result)).toContain('средний')
+  expect(env.efforts).toEqual(['xhigh', 'xhigh', 'medium'])
 })
 
-test('запросы агентов: свой уровень не навязывается, но не выше высокого', async ($, on) => {
+test('запросы агентов: свой уровень не навязывается, но от среднего до сверхвысокого', async ($, on) => {
   const env = await start($, on)
 
   await turn($, 'Почему падает тест?')
   await step($, 'medium', 'a1')
   await step($, 'max', 'a1')
+  await step($, 'low', 'a1')
 
-  expect(env.efforts).toEqual(['medium', 'high'])
+  expect(env.efforts).toEqual(['medium', 'xhigh', 'medium'])
 })
 
-test('агенты: слепая проверка — Opus высокий, Haiku — Sonnet, поиск без модели — Sonnet', async ($, on) => {
+test('агенты: слепая проверка — Opus высокий, остальные модели и поиск без модели — Opus', async ($, on) => {
   const env = await start($, on)
 
   await $.tool.call({ tool: 'Agent', description: 'Слепая приёмка', prompt: 'Проверь, не доверяй слепо', model: 'sonnet', effort: 'low' } as any)
@@ -165,29 +197,37 @@ test('агенты: слепая проверка — Opus высокий, Haiku
   await $.tool.call({ tool: 'Agent', description: 'Поиск', prompt: 'Найди', subagent_type: 'Explore' } as any)
   await $.tool.call({ tool: 'Agent', description: 'Код', prompt: 'Сделай', model: 'fable', effort: 'xhigh' } as any)
   await $.tool.call({ tool: 'Agent', description: 'Код', prompt: 'Сделай' } as any)
+  await $.tool.call({ tool: 'Agent', description: 'Сбор', prompt: 'Собери', model: 'sonnet', effort: 'low' } as any)
 
   const agents = env.calls.filter(c => c.tool === 'Agent')
   expect([agents[0].model, agents[0].effort]).toEqual(['opus', 'high'])
-  expect(agents[1].model).toBe('sonnet')
-  expect(agents[2].model).toBe('sonnet')
-  expect([agents[3].model, agents[3].effort]).toEqual(['opus', 'high'])
+  expect(agents[1].model).toBe('opus')
+  expect(agents[2].model).toBe('opus')
+  expect([agents[3].model, agents[3].effort]).toEqual(['opus', 'xhigh'])
   expect('model' in agents[4]).toBe(false)
+  expect([agents[5].model, agents[5].effort]).toEqual(['opus', 'medium'])
 })
 
-test('подпроекты: Haiku — Sonnet, Fable — Opus, сверхвысокий — высокий', async ($, on) => {
+test('подпроекты: любая модель — Opus, низкий — средний, максимум — сверхвысокий', async ($, on) => {
   const env = await start($, on)
 
   await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'Сбор', model: 'claude-haiku-5-5', effort: 'low' } as any)
   await $.tool.call({ tool: 'mcp__ccd_session_mgmt__set_session_model', session_id: 's', model: 'claude-fable-5-1' } as any)
   await $.tool.call({ tool: 'mcp__ccd_session_mgmt__set_session_effort', session_id: 's', effort: 'max' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session_mgmt__set_session_model', session_id: 's', model: 'claude-sonnet-5-5' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session_mgmt__set_session_effort', session_id: 's', effort: 'xhigh' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'Без модели' } as any)
 
-  const [s, m, f] = env.calls.filter(c => /ccd_session/.test(c.tool))
-  expect([s.model, s.effort]).toEqual(['claude-sonnet-5-5', 'low'])
+  const [s, m, f, sn, x, none] = env.calls.filter(c => /ccd_session/.test(c.tool))
+  expect([s.model, s.effort]).toEqual(['claude-opus-5-5', 'medium'])
   expect(m.model).toBe('claude-opus-5-5')
-  expect(f.effort).toBe('high')
+  expect(f.effort).toBe('xhigh')
+  expect(sn.model).toBe('claude-opus-5-5')
+  expect(x.effort).toBe('xhigh')
+  expect(none.model).toBe('claude-opus-5-5')
 })
 
-test('ручной режим проекта: уровень как в программе, без оценки и без потолка «высокий»; инструмент отказывает', async ($, on) => {
+test('ручной режим проекта: уровень как в программе, без оценки и без рамок; инструмент отказывает', async ($, on) => {
   const env = await start($, on, 0, { [PROJECT]: '{"uroven": "ручной"}' })
 
   await turn($, 'Покажи список последних коммитов в ветке main.')
@@ -225,12 +265,12 @@ test('/uroven ручной пишет файл проекта, сохраняя 
 
   const s: any = await $.command.run({ command: 'uroven', args: '' })
   await $.command.run({ command: 'uroven', args: 'авто' })
-  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await turn($, 'Почему падает тест?')
   await step($, 'medium')
 
   expect(String(s.text)).toContain('ставите вы')
   expect(JSON.parse(env.files[PROJECT]).uroven).toBe('авто')
-  expect(env.efforts).toEqual(['medium', 'low'])
+  expect(env.efforts).toEqual(['medium', 'high'])
 })
 
 test('ручной режим сессии переживает перезагрузку плагина; смена модели — не выбор уровня', async ($, on) => {
@@ -247,7 +287,7 @@ test('ручной режим сессии переживает перезагр
   }
   await turn($, 'Покажи список последних коммитов в ветке main.')
   await step($, 'high')
-  expect(env.efforts.at(-1)).toBe('low')
+  expect(env.efforts.at(-1)).toBe('medium')
 
   // Пользователь поднял уровень — ручной; перезагрузка плагина (session.start снова) его не сбрасывает
   await step($, 'max')
