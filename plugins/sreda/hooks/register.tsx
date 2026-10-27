@@ -2,6 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
+import { gitCall } from './git'
+import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
+import { setProbuzhdeniyaMode, wakeCheck } from './probuzhdeniya'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
 import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
 
@@ -385,7 +388,8 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
   return ids
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  setProbuzhdeniyaMode(options?.probuzhdeniya)
   // Ход сессии идёт — ответы кнопкой на вопросы без окна ждут его конца (tell). Начало хода — один хук на модуль, он
   // в uroven.ts
   registerUroven(on, () => (busy = true))
@@ -398,6 +402,11 @@ export const register: Register = on => {
       argumentHint: 'ручной | авто',
       immediate: true,
     })
+    await $.command.register({
+      name: 'pauza',
+      description: 'Пауза глобального проекта: разослать паузу подпроектам; окна и новые сессии — после /prodolzhit',
+    })
+    await $.command.register({ name: 'prodolzhit', description: 'Снять паузу глобального проекта и разослать «продолжай»' })
     const reg = await $.tool.register({
       name: 'otvecheno',
       description:
@@ -414,6 +423,7 @@ export const register: Register = on => {
     answeredTool = reg.tool
     resetStroka()
     await startUroven($)
+    await startPauza($)
     quiet = await subproject($)
     seen = undefined
     await refresh($)
@@ -444,17 +454,35 @@ export const register: Register = on => {
     await showPane($)
     return { text: 'Панель «Ждут ответа» открыта.' }
   })
+  on('command.run', { command: 'pauza' }, async $ => ({ text: await pauzaCommand($, true) }))
+  on('command.run', { command: 'prodolzhit' }, async $ => ({ text: await pauzaCommand($, false) }))
+
+  // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts) и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
+  on('prompt.submit', async ($, e: any, next) => {
+    const skip = await wakeCheck($, e).catch(() => null)
+    if (skip) return { drop: skip }
+    const marked = await pauzaPrompt($, e)
+    return next(marked === null ? e : { ...e, text: marked })
+  })
+
   on('command.run', { command: 'uroven' }, async ($, e) => ({ text: await urovenCommand($, String(e.args ?? '')) }))
 
   // Имя инструмента движок даёт при регистрации — сверяем с ним, а не с догадкой
   on('tool.call', async ($, e: any, next) => {
+    // На паузе — без новых сессий (hooks/pauza.ts); раньше уровня усилий: он сам отвечает за запуск сессий
+    const stop = e.agentId === undefined && next.origin.plugin === 'engine' ? pauzaDeny(e.tool) : null
+    if (stop) return stop
     // Уровень усилий: свой инструмент и рамки модели у агентов и подпроектов (hooks/uroven.ts)
     const level = urovenCall($, e, next)
     if (level) return level
     if (e.tool === answeredTool) {
       return { result: await answered($, String(e.question ?? ''), String(e.answer ?? '')) } as never
     }
-    if (next.origin.plugin !== 'engine' || !writesPane(e.tool, e)) return next(e)
+    if (next.origin.plugin !== 'engine') return next(e)
+    // Чужие файлы в «git add -A» и кириллица в «commit -m» (hooks/git.ts)
+    const risky = await gitCall($, e)
+    if (risky) return risky
+    if (!writesPane(e.tool, e)) return next(e)
     return {
       deny:
         'Файл панели «Ждут ответа» пишет сам плагин sreda: задайте вопрос окном AskUserQuestion — в панель он попадёт ' +
@@ -465,6 +493,8 @@ export const register: Register = on => {
   // Окно вопроса Claude: ждём, кто ответит первым — окно или кнопка панели. Вопросы других плагинов не трогаем.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (next.origin.plugin !== 'engine') return next(e)
+    // На паузе — без новых окон (hooks/pauza.ts)
+    if (isPaused()) return pauzaDeny('AskUserQuestion') as never
     const all = e.questions as Question[]
     // До разбора ответов из панели: отказ не трогает later, и исправленный повтор окна получит их как обычно
     const noCommand = missingCommand(all)

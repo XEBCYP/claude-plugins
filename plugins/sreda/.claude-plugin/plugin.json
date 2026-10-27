@@ -2,12 +2,31 @@
   "name": "sreda",
   "displayName": "Среда работы",
   "description": "Способ работы с пользователем в одном месте: правила (разобраться до конца, решить и показать с обоснованием, не применять без «да», вопросы окном и в панель, слова дословно), глобальный проект с подпроектами и сессиями, панель «Ждут ответа», автовыбор модели и уровня усилий. Вместе с delivery-control и autohandoff.",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "author": {
     "name": "XEBCYP"
   },
   "license": "MIT",
-  "keywords": ["workflow", "rules", "questions", "decisions", "subprojects", "sessions", "pane"],
-  "dependencies": ["delivery-control", "autohandoff"],
-  "types": "./types/index.d.ts"
+  "keywords": [
+    "workflow",
+    "rules",
+    "questions",
+    "decisions",
+    "subprojects",
+    "sessions",
+    "pane"
+  ],
+  "dependencies": [
+    "delivery-control",
+    "autohandoff"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "probuzhdeniya": {
+      "type": "string",
+      "title": "Пустые пробуждения глобальной: zapis — только записывать, filtr — не будить",
+      "description": "zapis (по умолчанию): каждое пробуждение от подпроектов — в ~/.claude/sreda-probuzhdeniya.json с пометкой, шум ли это. filtr: пробуждение без новых отчётов подпроектов сессию не будит",
+      "default": "zapis"
+    }
+  }
 }
