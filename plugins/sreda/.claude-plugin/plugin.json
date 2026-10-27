@@ -7,26 +7,7 @@
     "name": "XEBCYP"
   },
   "license": "MIT",
-  "keywords": [
-    "workflow",
-    "rules",
-    "questions",
-    "decisions",
-    "subprojects",
-    "sessions",
-    "pane"
-  ],
-  "dependencies": [
-    "delivery-control",
-    "autohandoff"
-  ],
-  "types": "./types/index.d.ts",
-  "userConfig": {
-    "probuzhdeniya": {
-      "type": "string",
-      "title": "Пустые пробуждения глобальной: zapis — только записывать, filtr — не будить",
-      "description": "zapis (по умолчанию): каждое пробуждение от подпроектов — в ~/.claude/sreda-probuzhdeniya.json с пометкой, шум ли это. filtr: пробуждение без новых отчётов подпроектов сессию не будит",
-      "default": "zapis"
-    }
-  }
+  "keywords": ["workflow", "rules", "questions", "decisions", "subprojects", "sessions", "pane"],
+  "dependencies": ["delivery-control", "autohandoff"],
+  "types": "./types/index.d.ts"
 }

@@ -36,7 +36,8 @@ import type { Band } from '../types'
 type Dollar = Parameters<Hook<'session.start'>>[0]
 
 // Придержанное сообщение: пользователя — уйдёт от его имени; другой сессии или событие — как сообщение плагина
-type Held = { text: string; isUser: boolean }
+// isSession — от другой сессии (пометка при пересылке в чистую сессию)
+type Held = { text: string; isUser: boolean; isSession?: boolean }
 
 type Pending = {
   path: string
@@ -270,12 +271,25 @@ async function isSubproject($: Dollar, raw: string): Promise<boolean> {
 
 const asHeld = (one: Held | string): Held => (typeof one === 'string' ? { text: one, isUser: true } : one)
 
-const OTHER_NOTE = 'Сообщение пришло, пока шла автопередача в чистый контекст (от другой сессии или служебное):\n\n'
+// Откуда сообщения, которые помечаются «от другой сессии»: сообщения сессий, уведомления фоновых задач, отчёты сессий,
+// запущенных этой (<side-sessions-event>). Остальные (нажатие кнопки, канал, расписание, неизвестные) — без этой пометки
+const SESSION_ORIGINS = new Set(['peer', 'peer-send-message', 'projects-relay', 'coordinator', 'task-notification'])
+const SESSION_NOTE = 'Сообщение от другой сессии пришло, пока шла автопередача в чистый контекст:\n\n'
+const OTHER_NOTE = 'Сообщение пришло, пока шла автопередача в чистый контекст:\n\n'
+
+// Пришедшее не от пользователя — с пометкой, откуда оно; продолжение действия пользователя (нажатие кнопки) — как его
+// сообщение
+function heldOf(e: any): Held {
+  const text = String(e.text ?? '')
+  const kind = String(e.origin?.kind ?? '')
+  if (kind === 'auto-continuation') return { text, isUser: true }
+  return SESSION_ORIGINS.has(kind) || text.includes('<side-sessions-event>') ? { text, isUser: false, isSession: true } : { text, isUser: false }
+}
 
 async function resubmit($: Dollar, items: (Held | string)[]): Promise<void> {
   for (const one of items.map(asHeld)) {
     if (one.isUser) await $.prompt.submit({ text: one.text, asUser: true })
-    else await $.prompt.submit({ text: OTHER_NOTE + one.text })
+    else await $.prompt.submit({ text: (one.isSession ? SESSION_NOTE : OTHER_NOTE) + one.text })
   }
 }
 
@@ -552,10 +566,10 @@ async function tryHandoff($: Dollar, text: string): Promise<string | null> {
   return `Контекст ${Math.round(ctx)} тыс. токенов, задача закончена: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само. Выключить автопередачу для этой сессии — /autohandoff off.`
 }
 
-async function holdDuringHandoff($: Dollar, text: string, isUser = true): Promise<string> {
+async function holdDuringHandoff($: Dollar, text: string, isUser = true, from?: Held): Promise<string> {
   const p = mark.pending
   if (p) {
-    mark = { ...mark, pending: { ...p, held: [...p.held, { text, isUser }] } }
+    mark = { ...mark, pending: { ...p, held: [...p.held, from ?? { text, isUser }] } }
     await save($)
   }
   return 'Идёт передача в чистый контекст — это сообщение уйдёт туда сразу после документа передачи.'
@@ -650,12 +664,13 @@ async function eventDue($: Dollar): Promise<number | null> {
 // Не от пользователя и не от плагина: сообщение другой сессии, уведомление, событие приложения
 async function onOtherSubmit($: Dollar, e: any): Promise<string | null> {
   if (e.command || e.attachments?.length) return null
-  if (mark.pending) return holdDuringHandoff($, e.text, false)
+  if (mark.pending) return holdDuringHandoff($, e.text, false, heldOf(e))
   // Доставка внутрь идущего хода — не трогаем
   if (e.turnId) return null
-  const held = [{ text: String(e.text ?? ''), isUser: false }]
+  const held = [heldOf(e)]
   if (bandNow) {
-    if (!bandNow.isDue) return null
+    // Отсчёт пользователь поставил на паузу — он читает экран: событие его не прерывает и идёт в эту сессию
+    if (!bandNow.isDue || bandNow.isPaused) return null
     await handoffNow($, held)
     return 'Идёт передача в чистый контекст — это сообщение уйдёт туда сразу после документа передачи.'
   }

@@ -4,7 +4,7 @@ import type { Register } from 'claude-code'
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
 import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
-import { setProbuzhdeniyaMode, wakeCheck } from './probuzhdeniya'
+import { wakeCheck } from './probuzhdeniya'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
 import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
 
@@ -388,8 +388,7 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
   return ids
 }
 
-export const register: Register = (on, options) => {
-  setProbuzhdeniyaMode(options?.probuzhdeniya)
+export const register: Register = on => {
   // Ход сессии идёт — ответы кнопкой на вопросы без окна ждут его конца (tell). Начало хода — один хук на модуль, он
   // в uroven.ts
   registerUroven(on, () => (busy = true))
@@ -459,10 +458,9 @@ export const register: Register = (on, options) => {
 
   // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts) и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
   on('prompt.submit', async ($, e: any, next) => {
-    const skip = await wakeCheck($, e).catch(() => null)
-    if (skip) return { drop: skip }
-    const marked = await pauzaPrompt($, e)
-    return next(marked === null ? e : { ...e, text: marked })
+    await wakeCheck($, e).catch(() => undefined)
+    const note = await pauzaPrompt($, e)
+    return next(note === null ? e : { ...e, context: [...(e.context ?? []), note] })
   })
 
   on('command.run', { command: 'uroven' }, async ($, e) => ({ text: await urovenCommand($, String(e.args ?? '')) }))

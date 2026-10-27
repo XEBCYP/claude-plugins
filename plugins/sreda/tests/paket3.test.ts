@@ -14,6 +14,7 @@ type Env = {
   // git status --porcelain в репозитории C:/Projects/Demo
   status: string
   ran: string[][]
+  id: string
 }
 
 function engine(on: any, env: Env) {
@@ -28,7 +29,7 @@ function engine(on: any, env: Env) {
     throw new Error('ENOENT')
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.id', () => ({ value: env.id }))
   on('session.cwd', () => ({ value: env.cwd }))
   on('fs.read', (_: unknown, e: { path: string }) => ({ value: env.files[e.path.replace(/\\/g, '/')] ?? '' }))
   on('fs.write', (_: unknown, e: { path: string; text: string }) => {
@@ -39,13 +40,18 @@ function engine(on: any, env: Env) {
     env.ran.push(e.argv)
     const args = e.argv.slice(3)
     if (args[0] === 'rev-parse') return { value: { exitCode: 0, stdout: 'C:/Projects/Demo\n', stderr: '' } }
-    if (args.includes('status')) return { value: { exitCode: 0, stdout: env.status, stderr: '' } }
+    if (args.includes('status')) {
+      // commit -a и add -u: только файлы под git
+      const lines = env.status.split('\n').filter(line => !(args.includes('--untracked-files=no') && line.startsWith('??')))
+      return { value: { exitCode: 0, stdout: lines.join('\n'), stderr: '' } }
+    }
     return { value: { exitCode: 1, stdout: '', stderr: '' } }
   })
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
-  on('prompt.submit', (_: unknown, e: { text: string }) => {
-    env.submits.push(e.text)
+  // Пометка плагина для модели — в context: записываем вместе с текстом
+  on('prompt.submit', (_: unknown, e: { text: string; context?: string[] }) => {
+    env.submits.push([e.text, ...(e.context ?? [])].join('\n\n'))
     return { text: e.text }
   })
   on('tool.call', () => ({ result: 'ran' }))
@@ -54,7 +60,7 @@ function engine(on: any, env: Env) {
 }
 
 function fresh(): Env {
-  return { files: {}, submits: [], cwd: 'C:\\Projects\\Demo', status: '', ran: [] }
+  return { files: {}, submits: [], cwd: 'C:\\Projects\\Demo', status: '', ran: [], id: 'sess-1' }
 }
 
 const start = ($: any) => $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true } as never)
@@ -63,15 +69,60 @@ const denied = (r: any) => typeof r?.deny === 'string'
 
 // --- R1: git add -A при чужих файлах
 
+const scopes = (cmd: string) => {
+  const r = gitRisk(cmd, 'C:/P')
+  return r?.kind === 'all' ? r.scopes : r
+}
+
 test('gitRisk: add -A, add ., add --all, commit -a, commit -am — опасно; add по именам и commit --amend — нет', () => {
-  for (const cmd of ['git add -A', 'git add .', 'git add --all', 'git commit -a -m x', 'git commit -am "x"', 'cd sub && git add -A']) {
+  for (const cmd of [
+    'git add -A', 'git add .', 'git add --all', 'git commit -a -m x', 'git commit -am "x"', 'cd sub && git add -A',
+    // Пропуски, найденные проверкой
+    'git add -u', 'git add :/', 'git add *', 'git add ./', 'git -c core.autocrlf=false add -A', 'git --no-pager add .',
+    'git add -Av', '& git add -A',
+  ]) {
     expect(gitRisk(cmd, 'C:/P')?.kind).toBe('all')
   }
-  for (const cmd of ['git add a.txt b/c.md', 'git commit --amend --no-edit', 'git commit -F msg.txt', 'git status', 'git add ./src/a.ts']) {
+  for (const cmd of [
+    'git add a.txt b/c.md', 'git commit --amend --no-edit', 'git commit -F msg.txt', 'git status', 'git add ./src/a.ts',
+    // Те же слова в кавычках — не команда
+    'git commit -m "fix -a flag handling"', 'echo "run git add -A first"', 'git commit -m "Fix; git add -A later"',
+    "git commit -m 'git add .'", 'git commit --author "A -a" -m x',
+  ]) {
     expect(gitRisk(cmd, 'C:/P')).toBe(null)
   }
-  expect(gitRisk('git -C C:/Other add -A', 'C:/P')).toEqual({ kind: 'all', dir: 'C:/Other' })
-  expect(gitRisk('cd C:/Other && git add .', 'C:/P')).toEqual({ kind: 'all', dir: 'C:/Other' })
+  expect(scopes('git -C C:/Other add -A')).toEqual([{ dir: 'C:/Other', paths: null, tracked: false }])
+  expect(scopes('cd C:/Other && git add .')).toEqual([{ dir: 'C:/Other', paths: ['.'], tracked: false }])
+  expect(scopes('Set-Location -LiteralPath C:/X; git add -A')).toEqual([{ dir: 'C:/X', paths: null, tracked: false }])
+  // Граница проверки: commit -a и add -u — только файлы под git; add -A -- папка — только папка
+  expect(scopes('git commit -a -m x')).toEqual([{ dir: 'C:/P', paths: null, tracked: true }])
+  expect(scopes('git add -u')).toEqual([{ dir: 'C:/P', paths: null, tracked: true }])
+  expect(scopes('git add -A -- src/')).toEqual([{ dir: 'C:/P', paths: ['src/'], tracked: false }])
+})
+
+test('gitRisk: кириллица — только в сообщении -m, в том числе многострочном и после «git add -A &&»', () => {
+  for (const cmd of [
+    'git commit -m "sreda: пакет 3"',
+    "git commit -m \"$(cat <<'EOF'\nИсправлена ошибка\n\nCo-Authored-By: Claude\nEOF\n)\"",
+    "git commit -m @'\nИсправлена ошибка\n'@",
+    'git add -A && git commit -m "Исправлено"',
+    'git commit --message="Исправлено"',
+    'git commit -m"Исправлено"',
+    'git commit --amend -m "Исправлено"',
+    "git commit -m \"$(cat <<'EOF'\nDon't break: исправлено\nEOF\n)\"",
+  ]) {
+    expect(gitRisk(cmd, 'C:/P')).toEqual({ kind: 'cyrillic' })
+  }
+  for (const cmd of [
+    'git -C "C:/Projects/ЗаявкиСрезка" commit -m "fix typo"',
+    'git commit -m "fix" -- "docs/Подпроекты.md"',
+    'git commit -F C:/tmp/сообщение.txt',
+    'cd C:/Projects/ЗаявкиСрезка && git commit -m "fix"',
+  ]) {
+    expect(gitRisk(cmd, 'C:/P')?.kind ?? null).not.toBe('cyrillic')
+  }
+  // Строки сообщения heredoc — не команды
+  expect(gitRisk("git commit -F - <<'EOF'\ngit add -A\nEOF", 'C:/P')).toBe(null)
 })
 
 test('changedPaths: изменённые, новые и переименованные файлы', () => {
@@ -93,6 +144,13 @@ test('add -A: в папке чужой изменённый файл — отк�
 
   env.status = ' M src/a.ts\n'
   expect(denied(await bash($, 'git add -A'))).toBe(false)
+
+  // commit -a не берёт новые файлы: чужой новый файл ему не мешает
+  env.status = ' M src/a.ts\n?? docs/чужой.md\n'
+  expect(denied(await bash($, 'git commit -a -F msg.txt'))).toBe(false)
+  // add -A -- папка: проверяется только папка
+  expect(denied(await bash($, 'git add -A -- src/'))).toBe(true)
+  expect(env.ran.at(-1)?.slice(-2)).toEqual(['--', 'src/'])
 })
 
 test('add по именам не проверяет папку и не мешает', async ($, on) => {
@@ -122,6 +180,7 @@ test('commit -m с кириллицей — отказ с подсказкой -
 
 test('/pauza: окна и новые сессии — отказ, модели — сообщение разослать паузу; /prodolzhit снимает', async ($, on) => {
   const env = fresh()
+  env.files['C:/Projects/Demo/docs/Подпроекты.md'] = '# Реестр'
   const clock = engine(on, env)
   await start($)
   const r = await $.command.run({ command: 'pauza', args: '' } as never)
@@ -154,6 +213,28 @@ test('глобальная: «поставь всех на паузу» вклю
   expect(denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))).toBe(true)
   await user('Продолжай')
   expect(env.submits.at(-1)).toContain('пауза снята')
+  expect(denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))).toBe(false)
+})
+
+test('пауза: пометка для модели — не в тексте сообщения; переживает новую сессию (другой id) в той же папке', async ($, on) => {
+  const env = fresh()
+  env.files['C:/Projects/Demo/docs/Подпроекты.md'] = '# Реестр'
+  engine(on, env)
+  await start($)
+  const r = await $.prompt.submit({ text: 'Поставь на паузу', wait: false, origin: { kind: 'composer' } } as never)
+  expect((r as any).text).toBe('Поставь на паузу')
+  // Передача в чистую сессию: id сменился, папка та же
+  env.id = 'sess-2'
+  await start($)
+  expect(denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))).toBe(true)
+})
+
+test('/pauza вне глобальной — подсказка, паузы нет', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await start($)
+  const r = await $.command.run({ command: 'pauza', args: '' } as never)
+  expect((r as any).text).toContain('глобальной')
   expect(denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))).toBe(false)
 })
 
@@ -195,16 +276,13 @@ test('режим записи (по умолчанию): пробуждение 
   expect(items[0].notes[0].id).toBe('local_a')
 })
 
-test('режим filtr: шум не будит сессию, настоящий отчёт — будит', { options: { probuzhdeniya: 'filtr' } }, async ($, on) => {
+test('пробуждение, пересланное автопередачей (от плагина), второй раз не записывается; вставленное пользователем — не пишется', async ($, on) => {
   const env = fresh()
   engine(on, env)
   await start($)
-  const noise = await $.prompt.submit({ text: wake(), wait: false, origin: { kind: 'unclassified' } } as never)
-  expect(typeof (noise as any).drop).toBe('string')
   const real = wake(note('R51', 'local_b', 'R51 is finished'))
-  const r = await $.prompt.submit({ text: real, wait: false, origin: { kind: 'unclassified' } } as never)
-  expect('drop' in (r as any)).toBe(false)
-  // Пользователь вставил такой текст сам — не трогаем
-  const own = await $.prompt.submit({ text: wake(), wait: false, origin: { kind: 'composer' } } as never)
-  expect('drop' in (own as any)).toBe(false)
+  await $.prompt.submit({ text: real, wait: false, origin: { kind: 'unclassified' } } as never)
+  await $.prompt.submit({ text: `Сообщение от другой сессии пришло…:\n\n${real}`, wait: false, origin: { kind: 'plugin', name: 'autohandoff' } } as never)
+  await $.prompt.submit({ text: wake(), wait: false, origin: { kind: 'composer' } } as never)
+  expect(JSON.parse(env.files[WAKES]).items.length).toBe(1)
 })

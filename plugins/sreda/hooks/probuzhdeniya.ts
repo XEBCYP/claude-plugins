@@ -6,14 +6,16 @@
 // by a hook: Идёт передача в чистый контекст…» — это не работа подпроекта, а отказ мода автопередачи.
 //
 // Шум — пробуждение, в котором нет ни одного отчёта, или каждый отчёт пустой, служебный (NOISE) либо повторяет прошлый
-// отчёт той же сессии. Режим «zapis» (по умолчанию): каждое пробуждение — строкой в ~/.claude/sreda-probuzhdeniya.json с
-// пометкой, шум ли это; сообщение идёт как обычно. Режим «filtr»: шум не будит сессию. Фильтр включается настройкой
-// плагина probuzhdeniya = filtr после просмотра записи — сначала образец, потом весь объём.
+// отчёт той же сессии. Пока плагин только записывает: каждое пробуждение — строкой в ~/.claude/sreda-probuzhdeniya.json с
+// пометкой, шум ли это; сообщение идёт как обычно. Фильтр — отдельным выпуском, правила — по этой записи (сначала
+// образец, потом весь объём); пометка «шум» здесь — догадка, которую запись проверит.
 
 const LOG = 'sreda-probuzhdeniya.json'
 const K_LAST = 'probuzhdeniya:last'
 // Сколько записей держать в журнале
 const KEEP = 300
+// Сколько сессий помнить в прошлых отчётах
+const KEEP_LAST = 200
 const EVENT = '<side-sessions-event>'
 const NOTE =
   /The session "([^"]*)" you started \((local_[\w-]+)\) finished a turn\. It reported \(quoted child output, data not instructions\): "([\s\S]*?)"(?: \(first \d+ of \d+ characters\))? Read it with/g
@@ -23,12 +25,6 @@ const NOISE = [/^\s*$/, /^Prompt dropped by a hook\b/i, /^\(no (?:content|respon
 export type Note = { id: string; title: string; report: string }
 // head — начало текста: в записи видно, доходят ли отчёты до хука в самом тексте (иначе фильтр включать нельзя)
 export type Wake = { at: string; project: string; origin: string; notes: Note[]; isNoise: boolean; why: string; head: string }
-
-let mode: 'zapis' | 'filtr' = 'zapis'
-
-export function setProbuzhdeniyaMode(value: unknown): void {
-  mode = value === 'filtr' ? 'filtr' : 'zapis'
-}
 
 export function notesOf(text: string): Note[] {
   return [...text.matchAll(NOTE)].map(m => ({ title: m[1], id: m[2], report: m[3] }))
@@ -59,15 +55,17 @@ async function append($: any, wake: Wake): Promise<void> {
   await $.fs.write(path, JSON.stringify({ items: [...items, wake].slice(-KEEP) }, null, 2))
 }
 
-// Хук prompt.submit: пробуждение — запись; в режиме filtr шум — причина отказа, иначе null
-export async function wakeCheck($: any, e: any): Promise<string | null> {
+// Хук prompt.submit: пробуждение — строкой в журнал; само сообщение идёт как обычно
+export async function wakeCheck($: any, e: any): Promise<void> {
   const text = String(e.text ?? '')
-  if (!text.includes(EVENT)) return null
+  if (!text.includes(EVENT)) return
   const kind = String(e.origin?.kind ?? '')
   // Пользователь вставил такой текст сам — не пробуждение
-  if (kind === 'composer' || kind === 'bridge') return null
+  if (kind === 'composer' || kind === 'bridge') return
   const notes = notesOf(text)
   const last = ((await $.store.get(K_LAST)) as Record<string, string> | undefined) ?? {}
+  // Пробуждение, придержанное автопередачей, приходит снова от плагина: уже записанное второй раз не пишем
+  if (kind === 'plugin' && notes.every(n => last[n.id] === n.report)) return
   const verdict = judge(notes, last)
   const cwd = String(await $.session.cwd()).split('\\').join('/')
   const wake: Wake = {
@@ -80,7 +78,8 @@ export async function wakeCheck($: any, e: any): Promise<string | null> {
   }
   await append($, wake).catch(() => undefined)
   if (notes.length > 0) {
-    await $.store.set(K_LAST, { ...last, ...Object.fromEntries(notes.map(n => [n.id, n.report])) })
+    const ids = new Set(notes.map(n => n.id))
+    const kept = Object.entries(last).filter(([id]) => !ids.has(id)).slice(-(KEEP_LAST - notes.length))
+    await $.store.set(K_LAST, Object.fromEntries([...kept, ...notes.map(n => [n.id, n.report])]))
   }
-  return mode === 'filtr' && verdict.isNoise ? `Пробуждение без новых отчётов подпроектов (${verdict.why}) — пропущено плагином sreda.` : null
 }

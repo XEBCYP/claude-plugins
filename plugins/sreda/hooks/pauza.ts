@@ -4,7 +4,9 @@
 // паузу». Теперь пауза — состояние сессии, которое держит плагин: /pauza или слова пользователя «поставь на паузу»,
 // «нужно перезагрузить» включают её, /prodolzhit или «продолжай» — снимают. На паузе плагин не даёт показать новое окно
 // вопроса и запустить новую сессию; рассылку паузы и «продолжай» подпроектам делает сама глобальная (SendMessage) по
-// сообщению плагина. Пауза хранится в $.store под id сессии — переживает перезапуск программы, ради которого и ставится.
+// сообщению плагина. Пауза хранится в $.store по папке глобального проекта, а не по id сессии: переживает перезапуск
+// программы, ради которого и ставится, и передачу в чистую сессию (после /clear id сессии может смениться). Пауза — только
+// в глобальной сессии (в её папке — docs/Подпроекты.md); в других /pauza отвечает подсказкой.
 
 const K_PAUSE = 'pauza:'
 const START_SESSION = 'mcp__ccd_session__start_session'
@@ -24,10 +26,10 @@ let key = ''
 let isGlobal = false
 
 export async function startPauza($: any): Promise<void> {
-  key = K_PAUSE + String(await $.session.id())
-  paused = !!(await $.store.get(key))
   const cwd = String(await $.session.cwd()).split('\\').join('/').replace(/\/+$/, '')
   isGlobal = await $.fs.read(`${cwd}/${REGISTRY}`).then((text: unknown) => String(text ?? '').length > 0, () => false)
+  key = K_PAUSE + cwd.toLowerCase()
+  paused = isGlobal && !!(await $.store.get(key))
 }
 
 export function isPaused(): boolean {
@@ -51,8 +53,13 @@ const GO_NOTE =
   '[Плагин sreda: пауза снята.] Разошли «продолжай» подпроектам, которые были поставлены на паузу, и продолжай работу; ' +
   'открытые вопросы, отложенные на паузе, задай окнами снова.'
 
+const NOT_GLOBAL =
+  'Пауза — команда глобальной сессии (в её папке — docs/Подпроекты.md): там она останавливает окна и запуск сессий и ' +
+  'рассылается подпроектам. Здесь пауза не включена — поставьте её в глобальной сессии.'
+
 // Команды /pauza, /prodolzhit: текст для пользователя; сообщение модели — отдельно, через $.prompt.submit
 export async function pauzaCommand($: any, on: boolean): Promise<string> {
+  if (!isGlobal) return NOT_GLOBAL
   if (on === paused) return on ? 'Пауза уже включена — снять: /prodolzhit или «продолжай».' : 'Паузы нет.'
   await setPaused($, on)
   // Из хука command.run сообщение ждало бы ход, который этот хук держит, — отправляем после него
@@ -60,17 +67,18 @@ export async function pauzaCommand($: any, on: boolean): Promise<string> {
   return on ? 'Пауза включена: окна вопросов и новые сессии — после /prodolzhit.' : 'Пауза снята.'
 }
 
-// Сообщение пользователя: включает или снимает паузу; само сообщение идёт как обычно, с пометкой для модели
+// Сообщение пользователя: включает или снимает паузу; само сообщение идёт как обычно, пометка для модели — рядом
+// (context), не в его тексте
 export async function pauzaPrompt($: any, e: any): Promise<string | null> {
   if (!isGlobal || !USER_ORIGINS.has(e.origin?.kind) || e.command || e.isMeta) return null
   const text = String(e.text ?? '')
   if (paused && GO_WORDS.test(text)) {
     await setPaused($, false)
-    return `${text}\n\n${GO_NOTE}`
+    return GO_NOTE
   }
   if (!paused && PAUSE_WORDS.test(text)) {
     await setPaused($, true)
-    return `${text}\n\n${PAUSE_NOTE}`
+    return PAUSE_NOTE
   }
   return null
 }
