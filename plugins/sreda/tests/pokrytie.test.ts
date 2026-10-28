@@ -24,6 +24,12 @@ const PLAN = `# План
 | R08 | «SMS» | | снято — «SMS не надо» |
 | R01 | «Сбор заказов» | FlowerCore | частично — часть 1 |
 | R09 | «потом» | | done 27.10 |
+
+| № | Требование | Кому | Статус |
+|---|---|---|---|
+| R62.1–R62.10 | «экран» | FlowerCore | установлено 27.10 — r62 |
+| R6.x | «опечатка» | | open |
+| R12 | «коротко» | Закупка |
 `
 
 test('статус — первые слова ячейки, а не любое совпадение внутри', () => {
@@ -37,7 +43,7 @@ test('статус — первые слова ячейки, а не любое 
 
 test('строки R из всех таблиц; повтор R — верна последняя запись', () => {
   const { rows, dups } = parse(PLAN)
-  expect(rows.map(r => r.id)).toEqual(['R01', 'R02.1', 'R03', 'R04', 'R05', 'R06', 'R07', 'R08', 'R09'])
+  expect(rows.map(r => r.id)).toEqual(['R01', 'R02.1', 'R03', 'R04', 'R05', 'R06', 'R07', 'R08', 'R09', 'R62.1–R62.10', 'R12'])
   expect(dups).toEqual(['R01'])
   const r01 = rows.find(r => r.id === 'R01')!
   expect(r01.status).toBe('частично')
@@ -46,12 +52,14 @@ test('строки R из всех таблиц; повтор R — верна �
 
 test('отчёт: передано, но не сделано; сделано, но не установлено; установлено, но не проверено', () => {
   const out = report(parse(PLAN))
-  expect(out).toContain('Требований R: 9; закрыто (проверено, снято): 2')
+  expect(out).toContain('Требований R: 11; закрыто (проверено, снято): 2')
   expect(out).toMatch(/## Передано, но не сделано — 3\n- R01 \(FlowerCore\): частично[^\n]*строка 20\n- R02\.1[^\n]*\n- R04/)
   expect(out).toMatch(/## Сделано, но не установлено — 1\n- R05 \(Закупка\)/)
-  expect(out).toMatch(/## Установлено, но не проверено пользователем — 1\n- R06/)
+  expect(out).toMatch(/## Установлено, но не проверено пользователем — 2\n- R06[^\n]*\n- R62\.1–R62\.10 \(FlowerCore\)/)
   expect(out).toMatch(/## Старый статус «готово»[^\n]*— 1\n- R03/)
-  expect(out).toMatch(/## Статус не распознан — 1\n- R09/)
+  // R12: ячеек меньше, чем в заголовке, — «Кому» по месту; последняя ячейка «Закупка» — не статус
+  expect(out).toMatch(/## Статус не распознан — 2\n- R09[^\n]*\n- R12 \(Закупка\)/)
+  expect(out).toMatch(/## Похожи на R, но не разобраны — 1\n- R6.x — строка \d+/)
   expect(out).not.toContain('Записано, но никому не передано')
   expect(out).toContain('Записаны в нескольких таблицах (взята последняя запись): R01')
 })
@@ -73,8 +81,10 @@ test('оглавление открытых R: без проверенных и 
   const block = toc(parsed)
   expect(block.startsWith(TOC_BEGIN)).toBe(true)
   expect(block.endsWith(TOC_END)).toBe(true)
-  expect(block).toContain('Открытые требования (7 из 9')
-  expect(block).toContain('- R05 — сделано — Закупка')
+  expect(block).toContain('Открытые требования: 9 из 11')
+  expect(block).toContain('- **частично** (1): R01')
+  expect(block).toContain('- **установлено** (2): R06, R62.1–R62.10')
+  expect(block).toContain('- **статус не распознан** (2): R09, R12')
   expect(block).not.toContain('R07')
   expect(block).not.toContain('R08')
 
