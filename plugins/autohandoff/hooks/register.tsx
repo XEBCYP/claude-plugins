@@ -31,6 +31,9 @@ import type { Band } from '../types'
 // (раньше событие сбрасывало отсчёт, и передача не наступала, а сообщение глобальной терялось); в сессии подпроекта
 // (её папку называет реестр глобального проекта) — передача без отсчёта: за ней никто не смотрит; с `steps` действий
 // за ход — напоминание довести шаг и закончить ход, дальше через каждые `stepsEvery`.
+// 28.10 (2.5.1): после передачи мод включается снова по контексту, который смотрит сам в начале хода и после действий
+// (событие session.measure приходит редко — чистые сессии Export1c7 проходили 150 тыс. за первый ход и не включались);
+// лимит `perHour` с `to` и у жёсткого предела считает только неудачные попытки.
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
@@ -75,6 +78,9 @@ type Mark = {
   lastTurn: LastTurn | null
   // Попытки передачи этой сессии (удачные и нет); после /clear переходят в чистую — против передач по кругу
   times: number[]
+  // Неудачные попытки (документ не записан, команда не запустилась): с `to` и у жёсткого предела лимит в час
+  // считает только их — удачные передачи 28.10 выбирали лимит, и сессия Export1c7 ушла за 300 тыс. без передачи
+  fails?: number[]
   at: number
 }
 
@@ -184,7 +190,7 @@ let stepsAt = 0
 function freshMark(): Mark {
   return {
     unit: 'k', pending: null, askAt: to, isArmed: true, armBelow: from, isOff: false, checkedAt: 0, quietBelow: 0,
-    lastTurn: null, times: [], at: 0,
+    lastTurn: null, times: [], fails: [], at: 0,
   }
 }
 
@@ -216,6 +222,30 @@ async function recentTimes($: Dollar): Promise<number[]> {
 async function noteTime($: Dollar): Promise<void> {
   mark = { ...mark, times: [...(await recentTimes($)), await $.clock.now()] }
   await save($)
+}
+
+async function recentFails($: Dollar): Promise<number[]> {
+  const now = await $.clock.now()
+  return (mark.fails ?? []).filter(t => now - t < HOUR)
+}
+
+// Лимит в час: ниже `to` — все попытки (против передач по кругу: чистая сессия, начавшаяся высоко, снова «готова»);
+// с `to` и у жёсткого предела — только неудачные: чистая сессия так высоко не начинается, а цикл неудач лимит держит
+async function isOverLimit($: Dollar, ctx: number): Promise<boolean> {
+  const list = ctx >= to ? await recentFails($) : await recentTimes($)
+  return list.length >= perHour
+}
+
+// После передачи мод выключен до спада контекста. Раньше спад ловило только событие session.measure, а оно приходит
+// редко: 28.10 две чистые сессии Export1c7 прошли 150 тыс. за первый ход, спада не увидели и выросли до 300–365 тыс.
+// Поэтому контекст смотрим сами — в начале хода и после действий основного цикла
+async function rearmIfLow($: Dollar, ctx?: number): Promise<void> {
+  if (mark.isArmed || mark.pending) return
+  const k = ctx ?? (await contextK($))
+  if (k < mark.armBelow) {
+    mark = { ...mark, isArmed: true, askAt: to, checkedAt: 0, quietBelow: 0, armBelow: from }
+    await save($)
+  }
 }
 
 // Контекст в тысячах токенов
@@ -333,7 +363,7 @@ async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false)
 async function cancelHandoff($: Dollar, why: string): Promise<void> {
   const p = mark.pending
   if (!p) return
-  mark = { ...mark, pending: null, isArmed: true }
+  mark = { ...mark, pending: null, isArmed: true, fails: [...(await recentFails($)), await $.clock.now()] }
   await save($)
   $.ui.toast(`${why} (${p.path}) — передача отменена`)
   await resubmit($, p.held)
@@ -355,7 +385,7 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
     await $.command.run({ command: 'clear' })
     // После /clear у диалога может смениться id: отметка — с нуля; включится снова, когда контекст спадёт
     cliId = await $.session.id()
-    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times }
+    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times, fails: mark.fails }
     await save($)
     const held = p.held.map(asHeld)
     if (held.some(one => one.isUser)) {
@@ -458,8 +488,8 @@ async function afterTurn($: Dollar, isAborted: boolean): Promise<void> {
   if (!isPersonal || isAborted || mark.pending || mark.isOff || !mark.isArmed || bandNow || isChecking || isIdleChecking) return
   const ctx = await contextK($)
   if (ctx < from || ctx < mark.quietBelow) return
-  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return
   const isDue = ctx >= to && ctx >= mark.askAt
+  if ((await isOverLimit($, ctx)) || (await isAgentBusy($))) return
   if (!isDue) {
     if (ctx < mark.checkedAt + RECHECK_STEP) return
     isIdleChecking = true
@@ -498,7 +528,7 @@ async function isGoodMoment($: Dollar, ctx: number, text: string): Promise<boole
   if (ctx < mark.checkedAt + RECHECK_STEP) return false
   // «Отменить» на полосе действует и на передачу по сообщению
   if (ctx < mark.quietBelow) return false
-  if ((await recentTimes($)).length >= perHour) return false
+  if (await isOverLimit($, ctx)) return false
   if (await isAgentBusy($)) return false
   const prompt = CHECK_PROMPT.replace('{ctx}', String(Math.round(ctx))).replace('{text}', () => text)
   const reply = await forkAnswer($, prompt)
@@ -538,7 +568,7 @@ async function commandText($: Dollar, raw: string): Promise<string> {
   const kind = (isGlobal ? ' Сессия глобального проекта — свои пороги.' : '') +
     (isSub ? ' Сессия подпроекта — передача без отсчёта.' : '') +
     ` Жёсткий предел — ${hard} тыс.: ход заканчивается сам.`
-  return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times} из ${perHour}.${origin}${turn}`
+  return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times} из ${perHour} (неудачных: ${(await recentFails($)).length}).${origin}${turn}`
 }
 
 // Удачный момент — начать передачу с этим сообщением и пришедшими во время проверки; иначе — null
@@ -591,6 +621,7 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
   turnNow = turnId
   stepCount = 0
   stepsAt = steps
+  await rearmIfLow($)
   // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода
   await cancelCountdown($, true)
   // Команда передачи стоит в очереди: первый ход основного цикла после её начала — ход записи документа
@@ -619,10 +650,7 @@ async function nudgeText($: Dollar): Promise<string | null> {
 }
 
 async function onMeasure($: Dollar, ctx: number): Promise<void> {
-  if (ctx < mark.armBelow && !mark.pending && !mark.isArmed) {
-    mark = { ...mark, isArmed: true, askAt: to, checkedAt: 0, quietBelow: 0, armBelow: from }
-    await save($)
-  }
+  await rearmIfLow($, ctx)
 }
 
 // Напоминание о длине хода: с `steps` действий основного цикла, затем через каждые `stepsEvery`
@@ -640,7 +668,7 @@ async function cutTurn($: Dollar): Promise<string | null> {
   if (!isPersonal || !isTurnRunning || !turnNow || mark.pending || mark.isOff || !mark.isArmed) return null
   const ctx = await contextK($)
   if (ctx < hard) return null
-  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return null
+  if ((await isOverLimit($, ctx)) || (await isAgentBusy($))) return null
   const turnId = turnNow
   turnNow = ''
   // Не ждём: ход, который держит этот хук, заканчивается его же отменой
@@ -657,7 +685,7 @@ async function eventDue($: Dollar): Promise<number | null> {
   if (!isPersonal || isTurnRunning || mark.pending || mark.isOff || !mark.isArmed || isChecking || isIdleChecking) return null
   const ctx = await contextK($)
   if (ctx < to || ctx < mark.askAt || ctx < mark.quietBelow) return null
-  if ((await recentTimes($)).length >= perHour || (await isAgentBusy($))) return null
+  if ((await isOverLimit($, ctx)) || (await isAgentBusy($))) return null
   return ctx
 }
 
@@ -743,6 +771,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId || e.tool === WRAP_UP) return r
+    await rearmIfLow($)
     const cut = await cutTurn($)
     if (cut) return { ...r, context: [...(r.context ?? []), cut] }
     const notes = [r.deny === undefined && !r.isError ? await nudgeText($) : null, await stepsText($)].filter(
