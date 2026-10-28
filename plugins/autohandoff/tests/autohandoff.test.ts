@@ -531,12 +531,79 @@ test('лимит в час переходит в чистую сессию по�
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
   await clock.settle()
   expect(env.commands).toContain('clear')
-  // Чистая сессия: контекст спал и снова вырос — попытка за этот час уже была
+  // Чистая сессия: контекст спал и снова вырос (ниже `to`) — попытка за этот час уже была
   await measure($, 100)
-  env.k = 300
+  env.k = 200
   await finishTask($, 't2')
   await clock.advance(16_000)
   expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(1)
+})
+
+// --- 28.10: сессии Export1c7 дошли до 300–365 тыс. без передачи
+
+// Передача по сообщению пользователя на текущем env.k: документ записан, /clear
+async function handoffDone($: any, clock: any, env: Env, tag: string): Promise<void> {
+  const before = env.commands.filter(c => c === 'clear').length
+  await finishTask($, `${tag}-task`)
+  await $.prompt.submit(userPrompt(`задача ${tag}`) as never)
+  await clock.settle()
+  await $.turn.start({ text: '', turnId: `${tag}-w` })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: `${tag}-w` } as never)
+  await clock.settle()
+  expect(env.commands.filter(c => c === 'clear').length).toBe(before + 1)
+}
+
+test('после передачи на 188 тыс. мод включается в начале хода чистой сессии — без события session.measure', async ($, on) => {
+  const env = fresh()
+  env.k = 188
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await handoffDone($, clock, env, 'a')
+  // Чистая сессия: первый ход начинается с малым контекстом и за этот ход проходит 250 тыс.
+  env.k = 45
+  await $.turn.start({ text: 'прочитай документ и продолжай', turnId: 't2' })
+  env.k = 260
+  expect(nudges(await $.tool.call({ tool: 'Read', file_path: 'a' } as never)).length).toBe(1)
+})
+
+test('две удачные передачи за час не отключают жёсткий предел', async ($, on) => {
+  const env = { ...fresh(), aborted: [] as string[] }
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await handoffDone($, clock, env, 'a')
+  env.k = 45
+  await $.turn.start({ text: 'дальше', turnId: 'b0' })
+  env.k = 200
+  await handoffDone($, clock, env, 'b')
+  env.k = 45
+  await $.turn.start({ text: 'дальше', turnId: 't3' })
+  env.k = 310
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await clock.settle()
+  expect(env.aborted).toEqual(['t3'])
+  expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(3)
+})
+
+test('две неудачные попытки за час — жёсткий предел ждёт: цикл неудач держит лимит', async ($, on) => {
+  const env = { ...fresh(), aborted: [] as string[] }
+  env.k = 310
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  for (const n of [1, 2]) {
+    await $.turn.start({ text: 'задача', turnId: `t${n}` })
+    await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+    await clock.settle()
+    // Ход записи кончился без документа — попытка неудачная
+    await $.turn.start({ text: '/autohandoff:write', turnId: `w${n}` })
+    await $.turn.complete({ answer: 'не вышло', durationMs: 1, isAborted: false, reason: 'answer', turnId: `w${n}` } as never)
+    await clock.settle()
+  }
+  expect(env.aborted).toEqual(['t1', 't2'])
+  await $.turn.start({ text: 'задача', turnId: 't3' })
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await clock.settle()
+  expect(env.aborted).toEqual(['t1', 't2'])
 })
 
 test('запуск -p или SDK (isInteractive false, не приложение) — в конце хода передачи нет', async ($, on) => {
