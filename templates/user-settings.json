@@ -17,7 +17,7 @@
   "enabledPlugins": {
     "1c-skills@xebcyp-plugins": false,
     "1c-skills-py@xebcyp-plugins": false,
-    "bsl-language-server@xebcyp-plugins": true,
+    "bsl-language-server@xebcyp-plugins": false,
     "data-skills@xebcyp-plugins": true,
     "frontend-design@claude-plugins-official": true,
     "ui-icons@xebcyp-plugins": true,
