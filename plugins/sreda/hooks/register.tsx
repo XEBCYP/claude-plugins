@@ -460,7 +460,8 @@ export const register: Register = on => {
 
   // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts) и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
   on('prompt.submit', async ($, e: any, next) => {
-    await wakeCheck($, e).catch(() => undefined)
+    const drop = await wakeCheck($, e).catch(() => null)
+    if (drop) return { drop }
     const note = await pauzaPrompt($, e)
     return next(note === null ? e : { ...e, context: [...(e.context ?? []), note] })
   })

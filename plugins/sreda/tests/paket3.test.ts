@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { changedPaths, gitRisk } from '../hooks/git'
-import { judge, notesOf } from '../hooks/probuzhdeniya'
+import { judge, notesOf, skip } from '../hooks/probuzhdeniya'
 
 // Пакет 3 аудита 27.10 (ADR 0015): защита git, пауза глобальной, журнал пустых пробуждений
 const HOME = 'C:/Users/tester/.claude'
@@ -263,16 +263,17 @@ test('judge: нет отчётов, отказ хука и повтор — шу
   expect(judge(real, { local_b: 'R51 is finished: origin/main is 3fd9827' }).isNoise).toBe(true)
 })
 
-test('режим записи (по умолчанию): пробуждение записано в журнал и идёт как обычно', async ($, on) => {
+test('пробуждение с отчётом записано в журнал и идёт как обычно', async ($, on) => {
   const env = fresh()
   engine(on, env)
   await start($)
-  const text = wake(note('R50', 'local_a', 'Prompt dropped by a hook: Идёт передача'))
+  const text = wake(note('R50', 'local_a', 'R76 is closed out: agent 1.5.0 is installed'))
   const r = await $.prompt.submit({ text, wait: false, origin: { kind: 'unclassified' } } as never)
   expect('drop' in (r as any)).toBe(false)
   const items = JSON.parse(env.files[WAKES]).items
   expect(items.length).toBe(1)
-  expect(items[0].isNoise).toBe(true)
+  expect(items[0].isNoise).toBe(false)
+  expect(items[0].dropped).toBeUndefined()
   expect(items[0].notes[0].id).toBe('local_a')
 })
 
@@ -332,4 +333,117 @@ test('в конце хода к записи пробуждения дописа
   await $.turn.complete({ answer: 'ok' } as never)
   const items = JSON.parse(env.files[WAKES]).items
   expect(items.map((one: any) => one.tools)).toEqual([['send_message', 'Read'], []])
+})
+
+// --- Второй день записи (ADR 0017): фильтр отказа хука и чистого ожидания
+
+test('skip: отказ хука и короткое ожидание своего прогона — отсечь; новости, вопросы, ожидание пользователя — нет', () => {
+  const one = (report: string) => skip(notesOf(wake(note('R50', 'local_a', report))))
+  // Отчёты второго дня и прошлых дней, на которые глобальная только пересказывала
+  for (const idle of [
+    'Prompt dropped by a hook: Контекст 160 тыс. токенов: сначала Claude запишет документ передачи и очистит контекст, затем ваше сообщение уйдёт в чистую сессию само.',
+    'Prompt dropped by a hook: Идёт передача в чистый контекст — это сообщение уйдёт туда сразу после документа передачи.',
+    'Prompt dropped by a hook: Сообщение принято и уйдёт следом за предыдущим.',
+    'Тесты идут.',
+    'Прогон идёт, около 4 мин.',
+    'Тесты ещё идут; жду результата.',
+    'Сухой прогон идёт (около 4 мин), жду.',
+    'Жду результата сухого прогона.',
+    "Waiting for the test run to finish; I'll report per step when it does.",
+  ])
+    expect(one(idle)).not.toBeNull()
+  for (const news of [
+    'C:/Users/sa.zakhar/.claude/handoffs/autohandoff-20261028-065814.md',
+    'Тесты прошли, жду команды на слияние.',
+    'Сборка готова, жду.',
+    'Тесты упали, жду ответа.',
+    'Жду ответа глобальной.',
+    'Waiting for the user to run the script as administrator.',
+    'Тесты ещё идут, коммит 1154950 сделан, жду.',
+    'Тесты ещё идут — подождать или остановить?',
+    'Жду.',
+    '',
+    `Тесты ещё идут; жду результата. ${'Подробности прогона. '.repeat(10)}`,
+    // Слепая проверка: отчёты, на которые глобальная должна ответить
+    'Prompt dropped by a hook: Идёт передача в чистый контекст — сообщение с вложением отправьте, когда она закончится.',
+    'Открыл PR #41, жду проверки.',
+    'Жду вашей проверки.',
+    'Жду подтверждения на копирование базы.',
+    'Жду согласования выгрузки.',
+    'Жду доступа к базе для проверки.',
+    'VPN не поднялся, жду, чтобы запустить выгрузку.',
+    'Файл базы занят 1С, жду освобождения для копирования.',
+    'Тесты зависли уже 40 минут, жду.',
+    'Сломалась сборка, жду.',
+    'Сборка не запускается, жду.',
+    '2 теста красные, перезапустил, жду.',
+    'Тесты: 45 из 120, жду.',
+    'Слил ветку, тесты идут, жду.',
+    'Waiting for approval to run the copy.',
+    'Waiting on you to confirm the run.',
+    'Waiting for your go-ahead before the build.',
+    'Tests are hanging; still waiting.',
+    'Test run timed out, still waiting.',
+    'Build blocked: no access to share; waiting.',
+    '3 tests red, rerunning; waiting.',
+    'Merged; tests in progress, waiting.',
+    'Жду её проверки.',
+    'Жду проверки.',
+    'Waiting for the check.',
+    'Waiting to run the tests.',
+  ])
+    expect(one(news)).toBeNull()
+  expect(skip([])).toBeNull()
+  // Ожидание пользователя, ошибка и остановка — не отсекаются, даже с текстом ожидания
+  expect(skip(notesOf(wake(waiting('R50', 'local_a', 'Тесты ещё идут; жду результата.'))))).toBeNull()
+  // Все отчёты пробуждения должны быть пустыми
+  const mixed = notesOf(wake(note('R50', 'local_a', 'Тесты ещё идут; жду результата.'), note('R51', 'local_b', 'R51 is merged')))
+  expect(skip(mixed)).toBeNull()
+  // Приложение пишет, что сессия ждёт пользователя, — не отсекаем
+  const quiet = notesOf(wake(note('R50', 'local_a', 'Тесты ещё идут; жду результата.')))
+  expect(skip(quiet, 'At least one is waiting for the user to answer a request in it')).toBeNull()
+  const both = notesOf(wake(note('R50', 'local_a', 'Тесты ещё идут; жду результата.'), note('R51', 'local_b', 'Жду результата сухого прогона.')))
+  expect(skip(both)).toContain('R51')
+})
+
+test('отсечённое пробуждение не идёт в сессию, но записано в журнал с причиной и без tools; следующее идёт', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await start($)
+  const r = await $.prompt.submit({ text: wake(note('R50', 'local_a', 'Тесты ещё идут; жду результата.')), wait: false, origin: { kind: 'sdk' } } as never)
+  expect(String((r as any).drop)).toContain('без новостей')
+  expect(env.submits).toEqual([])
+  await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+  await $.turn.complete({ answer: 'ok' } as never)
+  const real = wake(note('R50', 'local_a', 'R76 is closed out: agent 1.5.0 is installed'))
+  const r2 = await $.prompt.submit({ text: real, wait: false, origin: { kind: 'sdk' } } as never)
+  expect('drop' in (r2 as any)).toBe(false)
+  expect(env.submits.length).toBe(1)
+  await $.turn.complete({ answer: 'ok' } as never)
+  const items = JSON.parse(env.files[WAKES]).items
+  expect(items.map((one: any) => [Boolean(one.dropped), one.tools])).toEqual([
+    [true, undefined],
+    [false, []],
+  ])
+})
+
+test('вставленный пользователем текст пробуждения с ожиданием не отсекается', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await start($)
+  const r = await $.prompt.submit({ text: wake(note('R50', 'local_a', 'Тесты ещё идут; жду результата.')), wait: false, origin: { kind: 'composer' } } as never)
+  expect('drop' in (r as any)).toBe(false)
+  expect(env.submits.length).toBe(1)
+})
+
+test('журнал, который не читается как JSON, не затирается: копия рядом, потом новая запись', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await start($)
+  env.files[WAKES] = '{"items": [{"at": "2026-10-27'
+  await $.prompt.submit({ text: wake(note('R51', 'local_b', 'R51 is finished')), wait: false, origin: { kind: 'sdk' } } as never)
+  const bad = Object.keys(env.files).filter(k => k.includes('sreda-probuzhdeniya.bad-'))
+  expect(bad.length).toBe(1)
+  expect(env.files[bad[0]]).toBe('{"items": [{"at": "2026-10-27')
+  expect(JSON.parse(env.files[WAKES]).items.length).toBe(1)
 })
