@@ -618,7 +618,11 @@ test('команда для пользователя из preview — в пан�
       header: 'Установка',
       multiSelect: false,
       options: [
-        { label: 'Запустил, проверь', description: 'Проверю', preview: '```powershell\n' + cmd + '\n```' },
+        {
+          label: 'Запустил, проверь',
+          description: 'Проверю',
+          preview: '**Где запускать:** сервер EM-WIN-160, PowerShell от администратора\n\n```powershell\n' + cmd + '\n```',
+        },
         { label: 'Позже', description: 'Напомню' },
       ],
     }],
@@ -626,9 +630,12 @@ test('команда для пользователя из preview — в пан�
   await new Promise(resolve => setTimeout(resolve, 0))
   const [it] = list(env, MAIN)
   expect(it.command).toBe(cmd)
+  expect(it.where).toBe('сервер EM-WIN-160, PowerShell от администратора')
 
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Code' })).toBeDefined()
+  // Где запускать — в панели перед блоком команды (28.10)
+  expect(await ui.find({ type: 'Text', text: /^Где запускать: сервер EM-WIN-160, PowerShell от администратора$/ })).toBeDefined()
   // Копирует значок самого блока кода; своя большая кнопка убрана (26.10, пользователь: лишняя)
   expect(await ui.find({ type: 'Button', text: /Позже/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /Скопировать команду/ })).toBeUndefined()
@@ -648,7 +655,7 @@ test('команда в тексте вопроса — тоже в рамку; 
     tool: 'AskUserQuestion',
     questions: [
       {
-        question: 'Обычный PowerShell (Win+X → «Терминал»):\n```powershell\nGet-Service Flower*\n```',
+        question: 'Где запускать: этот сервер, обычный PowerShell (Win+X → «Терминал»)\n```powershell\nGet-Service Flower*\n```',
         header: 'Проверка',
         multiSelect: false,
         options: [{ label: 'Запустил, проверь' }, { label: 'Позже' }],
@@ -667,7 +674,9 @@ test('команда в тексте вопроса — тоже в рамку; 
   await new Promise(resolve => setTimeout(resolve, 0))
   const [first, second] = list(env, MAIN)
   expect(first.command).toBe('Get-Service Flower*')
+  expect(first.where).toBe('этот сервер, обычный PowerShell (Win+X → «Терминал»)')
   expect(second.command).toBeUndefined()
+  expect(second.where).toBeUndefined()
   release()
   await call
 })
@@ -770,6 +779,7 @@ test('окно «Запустил»: команда только в preview — 
   expect(await ui.find({ type: 'Code', text: /make-feed-key\.ps1 -Move/ })).toBeDefined()
   expect(await ui.find({ type: 'Code', text: /second\.ps1/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Команды:/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Где запускать: этот сервер, обычный PowerShell$/ })).toBeDefined()
   await ui.unmount()
 
   // Окно без «Запустил» — своего рисунка нет
@@ -777,6 +787,46 @@ test('окно «Запустил»: команда только в preview — 
   expect(await plain.find({ type: 'Code' })).toBeUndefined()
   expect(await plain.find({ type: 'Text', text: /Команд/ })).toBeUndefined()
   await plain.unmount()
+})
+
+test('команда без строки «Где запускать» — окно не показано; старый вопрос в панели — предупреждение', async ($, on) => {
+  const env: Env = { files: {}, submits: [], dialog: 'Позже', asked: [] }
+  // 28.10: вопрос выкладки FlowerCore — команда в панели, а где её запускать, не сказано
+  env.files[MAIN] = JSON.stringify({
+    items: [{
+      id: 'old', from: 'FlowerMarket_App · FlowerCore', question: 'Выложить R80?', status: 'open', session: 'sess-2',
+      options: [{ label: 'Запустил, проверь' }, { label: 'Позже' }],
+      command: 'powershell -ExecutionPolicy Bypass -File C:\\Projects\\FlowerCore\\deploy\\update-app.ps1',
+    }],
+  })
+  engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Demo', surface: 'desktop', isInteractive: true })
+
+  const block = '```powershell\npowershell -ExecutionPolicy Bypass -File C:\\x\\update-app.ps1\n```'
+  const r = await outcome($.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{
+      question: 'Выложить новую версию?',
+      header: 'Выкладка',
+      multiSelect: false,
+      options: [{ label: 'Запустил, проверь', preview: block }, { label: 'Позже' }],
+    }],
+  } as any))
+  expect(String(r.deny)).toContain('Где запускать')
+  expect(env.opened ?? 0).toBe(0)
+  // Команда без «Запустил» (в тексте вопроса) — то же правило
+  const r2 = await outcome($.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{ question: 'Проверьте службу:\n```powershell\nGet-Service Flower*\n```', header: 'Проверка', multiSelect: false, options: [{ label: 'Работает' }, { label: 'Нет' }] }],
+  } as any))
+  expect(String(r2.deny)).toContain('Где запускать')
+  expect(list(env, MAIN).length).toBe(1)
+
+  // Вопрос, записанный до 1.14.0, без строки — панель предупреждает, а не молчит
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Code', text: /update-app\.ps1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Где запускать — не указано/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('тот же вопрос уже в панели — флажки и команда берутся из окна', async ($, on) => {

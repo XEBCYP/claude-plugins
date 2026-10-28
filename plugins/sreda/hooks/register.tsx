@@ -282,32 +282,58 @@ function commandOf(q: Question): string | undefined {
   return undefined
 }
 
-// Окно «запустил / не запустил» без команды в рамке: пользователю нечего копировать ни в чате, ни в панели. Такое
-// окно не показываем, а возвращаем Claude с правилом (sreda:kak-rabotat, раздел 3)
+// Где запускать — строка «Где запускать: …» (или «Где: …», можно жирным) в тексте вопроса или в preview. 28.10 панель
+// показала команду выкладки FlowerCore без неё, и пользователю было не понять, куда её вставлять: «нужно, чтобы
+// обязательно в этом окне … перед окном для копирования этой ссылки указывалось, куда запускать».
+const WHERE_RUN = /^[ \t]*(?:[*_]{1,2})?[ \t]*где(?:[ \t]+запускать)?[ \t]*(?:[*_]{1,2})?[ \t]*[:—–][ \t]*(?:[*_]{1,2})?[ \t]*(.*\S)[ \t]*$/im
+const clean = (line: string) => line.replace(/^[*_\s]+|[*_\s]+$/g, '').trim()
+function whereOf(q: Question): string | undefined {
+  for (const text of [q.question, ...(q.options ?? []).map(o => o.preview ?? '')]) {
+    const found = WHERE_RUN.exec(text)?.[1]
+    if (found && clean(found)) return clean(found)
+  }
+  return undefined
+}
+
+// Окно «запустил / не запустил» без команды в рамке: пользователю нечего копировать ни в чате, ни в панели. Окно с
+// командой без строки «Где запускать» — непонятно, куда её вставлять. Такое окно не показываем, а возвращаем Claude с
+// правилом (sreda:kak-rabotat, раздел 3)
 // Подпись, которая начинается с «запустил»: «Не запустил», «Сервер запустился», «Перезапустил службу» — не то окно
 const RAN = /^[ \t]*(?:запустил[аи]?(?![а-яё])|выполнил[аи]? команду|ran it\b|I ran\b)/i
+const RULE =
+  'В preview рекомендуемого варианта положите строку «Где запускать: …» (какой компьютер; обычный PowerShell или ' +
+  'администратор — Win+X → «Терминал (администратор)») и под ней команду блоком ```powershell: по ним плагин покажет ' +
+  'над вариантами окна и в панели «Ждут ответа» сначала, где запускать, потом команду. Текст посреди хода пользователь ' +
+  'видит пересказом, без блоков, — строку «Где запускать» и команду ещё раз дайте в последнем сообщении хода. Команду ' +
+  'подпроекта и где её запускать, если их нет целиком, сначала возьмите у подпроекта. Затем задайте окно снова.'
 function missingCommand(questions: Question[]): string | undefined {
-  const q = questions.find(one => (one.options ?? []).some(o => RAN.test(o.label)) && !fencedOf(one))
-  if (!q) return undefined
-  return (
-    `Окно не показано: в вопросе «${q.question.slice(0, 80)}» есть вариант «запустил», но нет команды, которую ` +
-    'пользователь скопирует. В preview рекомендуемого варианта положите строку «где запускать» (компьютер; обычный ' +
-    'PowerShell или администратор) и команду блоком ```powershell: по нему плагин покажет команду над вариантами окна ' +
-    'и в панели «Ждут ответа». Текст посреди хода пользователь видит пересказом, без блоков, — команду ещё раз дайте ' +
-    'блоком в последнем сообщении хода. Команду подпроекта, если её нет целиком, сначала возьмите у подпроекта. Затем ' +
-    'задайте окно снова.'
-  )
+  const bare = questions.find(one => (one.options ?? []).some(o => RAN.test(o.label)) && !fencedOf(one))
+  if (bare) {
+    return (
+      `Окно не показано: в вопросе «${bare.question.slice(0, 80)}» есть вариант «запустил», но нет команды, которую ` +
+      `пользователь скопирует. ${RULE}`
+    )
+  }
+  const nowhere = questions.find(one => commandOf(one) && !whereOf(one))
+  if (nowhere) {
+    return (
+      `Окно не показано: в вопросе «${nowhere.question.slice(0, 80)}» есть команда, но нет строки «Где запускать: …» — ` +
+      `пользователю непонятно, куда её вставлять. ${RULE}`
+    )
+  }
+  return undefined
 }
 
 // Команды окна для рисунка над вариантами (ui.render AskUserQuestion): preview виден лишь на выбранном варианте, а текст
 // Claude посреди хода приложение показывает пересказом, без блоков кода (26.10: sreda 1.5.5–1.5.6 искали команду в чате
 // этого хода и отказывали каждому окну). Поэтому команду рисует сам плагин — по вопросам с вариантом «Запустил».
-function commandsOf(questions: Question[]): string[] {
-  const found = questions
-    .filter(one => (one.options ?? []).some(o => RAN.test(o.label)))
-    .map(fencedOf)
-    .filter((one): one is string => !!one)
-  return [...new Set(found)]
+function commandsOf(questions: Question[]): { command: string; where?: string }[] {
+  const found = new Map<string, { command: string; where?: string }>()
+  for (const one of questions.filter(q => (q.options ?? []).some(o => RAN.test(o.label)))) {
+    const command = fencedOf(one)
+    if (command && !found.has(command)) found.set(command, { command, where: whereOf(one) })
+  }
+  return [...found.values()]
 }
 
 // Пользователь отправил сообщение, не ответив: приложение закрывает окно и вместо ответа даёт заглушку «[User did not
@@ -360,6 +386,8 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
       else delete same.multi
       const command = commandOf(q)
       if (command) same.command = command
+      const where = whereOf(q)
+      if (where) same.where = where
       return same.id
     }
     const options: Option[] = (q.options ?? []).map(o => ({
@@ -368,6 +396,7 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
     }))
     const id = `${callId}-${k}`
     const command = commandOf(q)
+    const where = command ? whereOf(q) : undefined
     list.push({
       id,
       from: q.header ? `${project} · ${q.header}` : project,
@@ -375,6 +404,7 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
       options,
       ...(q.multiSelect ? { multi: true as const } : {}),
       ...(command ? { command } : {}),
+      ...(where ? { where } : {}),
       status: 'open',
       asked: new Date().toISOString().slice(0, 10),
       session: mine,
@@ -589,8 +619,11 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         <Text bold>{commands.length === 1 ? 'Команда:' : 'Команды:'}</Text>
-        {commands.map((command, k) => (
-          <Code key={`cmd-${k}`} source={command} language="powershell" />
+        {commands.map((one, k) => (
+          <Box key={`cmd-${k}`} flexDirection="column" gap={1}>
+            {one.where ? <Text bold>{`Где запускать: ${one.where}`}</Text> : null}
+            <Code source={one.command} language="powershell" />
+          </Box>
         ))}
         {await next(e)}
       </Box>
@@ -616,6 +649,15 @@ export const register: Register = on => {
             {it.why ? <Text>{it.why}</Text> : null}
             {/* Своя кнопка «Скопировать команду» под блоком убрана (26.10, пользователь: лишняя) — у блока кода есть свой
                 значок «Копировать код» */}
+            {/* Где запускать — перед блоком команды (28.10, пользователь: «Это очень важно»). У вопроса, записанного до
+                sreda 1.14.0, строки нет — так и сказать, а не молчать */}
+            {it.command ? (
+              it.where ? (
+                <Text bold>{`Где запускать: ${it.where}`}</Text>
+              ) : (
+                <Text color="warning">Где запускать — не указано: спросите в сессии, откуда вопрос, до запуска.</Text>
+              )
+            ) : null}
             {it.command ? <Code source={it.command} language="powershell" /> : null}
             {it.multi ? <Text dimColor>Можно выбрать несколько: отметьте и нажмите «Ответить».</Text> : null}
             {it.options.map((opt, k) => (
