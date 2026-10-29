@@ -34,6 +34,10 @@ import type { Band } from '../types'
 // 28.10 (2.5.1): после передачи мод включается снова по контексту, который смотрит сам в начале хода и после действий
 // (событие session.measure приходит редко — чистые сессии Export1c7 проходили 150 тыс. за первый ход и не включались);
 // лимит `perHour` с `to` и у жёсткого предела считает только неудачные попытки.
+// 29.10 (2.6.0): инструмент `peredat` — сессия, которая сама решила перейти в чистую, просит передачу, и в конце хода
+// она начинается без порогов и проверки момента (полоса с отсчётом; в подпроекте — сразу). Сессия Export1c7 на ~215 тыс.
+// написала «сверку сделает новая сессия» и встала: проверка момента на 209 тыс. ответила «нет» (шла загрузка),
+// следующая — только с 229 тыс., и до сообщения пользователя ничего не происходило.
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
@@ -81,6 +85,8 @@ type Mark = {
   // Неудачные попытки (документ не записан, команда не запустилась): с `to` и у жёсткого предела лимит в час
   // считает только их — удачные передачи 28.10 выбирали лимит, и сессия Export1c7 ушла за 300 тыс. без передачи
   fails?: number[]
+  // Сессия сама попросила передачу инструментом `peredat`: в конце хода — передача без порогов и проверки момента
+  isAsked?: boolean
   at: number
 }
 
@@ -99,6 +105,8 @@ const K_SESSION = 's:'
 // Общий счётчик попыток всех сессий из версии 2.1.0 — убирается
 const K_OLD_TIMES = 'times'
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
+// Полное имя инструмента `peredat` — его даёт $.tool.register при старте сессии
+let askTool = 'mcp__autohandoff__peredat'
 const USER_ORIGINS = new Set(['composer', 'sdk', 'bridge'])
 const DESKTOP_ENTRYPOINT = 'claude-desktop'
 // Упоминание файла (@путь): при повторной отправке оно не раскрывается — такое сообщение не придерживаем
@@ -433,10 +441,10 @@ async function setBand($: Dollar, next: Band | null): Promise<void> {
 }
 
 // Полоса с отсчётом: никто не нажал — передача
-async function startCountdown($: Dollar, ctx: number, isDue: boolean): Promise<void> {
+async function startCountdown($: Dollar, ctx: number, isDue: boolean, isAsked = false): Promise<void> {
   if (bandNow || mark.pending) return
   const gen = ++countGen
-  await setBand($, { left: countdown, isPaused: false, ctx: Math.round(ctx), isDue })
+  await setBand($, { left: countdown, isPaused: false, ctx: Math.round(ctx), isDue, ...(isAsked ? { isAsked } : {}) })
   tick($, gen)
 }
 
@@ -485,9 +493,18 @@ async function isAgentBusy($: Dollar): Promise<boolean> {
 
 // Конец хода основного цикла: удачный момент или верхний порог — полоса с отсчётом
 async function afterTurn($: Dollar, isAborted: boolean): Promise<void> {
-  if (!isPersonal || isAborted || mark.pending || mark.isOff || !mark.isArmed || bandNow || isChecking || isIdleChecking) return
+  if (!isPersonal || isAborted || mark.pending || mark.isOff || bandNow || isChecking || isIdleChecking) return
   const ctx = await contextK($)
-  if (ctx < from || ctx < mark.quietBelow) return
+  if (mark.isAsked) {
+    // Работают субагенты — их итог пропал бы: просьба ждёт конца следующего хода
+    if (await isAgentBusy($)) return
+    mark = { ...mark, isAsked: false }
+    await save($)
+    if (isSub) void startHandoff($, [], ctx)
+    else await startCountdown($, ctx, true, true)
+    return
+  }
+  if (!mark.isArmed || ctx < from || ctx < mark.quietBelow) return
   const isDue = ctx >= to && ctx >= mark.askAt
   if ((await isOverLimit($, ctx)) || (await isAgentBusy($))) return
   if (!isDue) {
@@ -540,6 +557,20 @@ async function isGoodMoment($: Dollar, ctx: number, text: string): Promise<boole
   return isYes
 }
 
+// Инструмент `peredat`: сессия сама решила перейти в чистую — передача в конце этого хода
+async function askHandoff($: Dollar, e: { agentId?: string }): Promise<string> {
+  if (e.agentId !== undefined) return 'Передачу просит только основная сессия, не субагент.'
+  if (!isPersonal) return 'В этом запуске (-p, SDK) автопередачи нет — передачи не будет.'
+  if (mark.isOff) return 'Пользователь выключил автопередачу в этой сессии (/autohandoff off) — передачи не будет; скажи ему об этом.'
+  if (mark.pending) return 'Передача уже идёт.'
+  mark = { ...mark, isAsked: true }
+  await save($)
+  const how = isSub
+    ? 'Передача начнётся сразу после конца этого хода.'
+    : `После конца этого хода пользователь увидит полосу с отсчётом ${countdown} с и кнопкой «Пауза», затем — передача.`
+  return `${how} Закончи ход коротким итогом; документ передачи мод попросит написать следующим ходом. Не пиши пользователю, что передаёшь, — полосу он увидит сам.`
+}
+
 async function commandText($: Dollar, raw: string): Promise<string> {
   const arg = raw.trim().toLowerCase()
   if (arg === 'now') {
@@ -557,9 +588,11 @@ async function commandText($: Dollar, raw: string): Promise<string> {
     ? 'выключена (/autohandoff on)'
     : mark.pending
       ? `идёт передача: ${mark.pending.path}`
-      : mark.isArmed
-        ? `ждёт момента: ${from}–${to} тыс. токенов — в конце задачи, с ${to} тыс. — в конце хода без проверки; перед передачей отсчёт ${countdown} с`
-        : `ждёт, пока контекст опустится ниже ${mark.armBelow} тыс. токенов`
+      : mark.isAsked
+        ? 'сессия попросила передачу — в конце хода'
+        : mark.isArmed
+          ? `ждёт момента: ${from}–${to} тыс. токенов — в конце задачи, с ${to} тыс. — в конце хода без проверки; перед передачей отсчёт ${countdown} с`
+          : `ждёт, пока контекст опустится ниже ${mark.armBelow} тыс. токенов`
   const times = (await recentTimes($)).length
   const origin = lastOrigin ? ` Последнее сообщение пользователя пришло как «${lastOrigin}».` : ''
   const wraps = { none: 'не было', clean: 'было, без вопроса', ask: 'было, с вопросом' }
@@ -739,6 +772,16 @@ export const register: Register = (on, options) => {
       name: 'autohandoff',
       description: 'Автопередача в чистый контекст: now — передать сейчас, off/on — выключить/включить для этой сессии, status',
     })
+    const reg = await $.tool.register({
+      name: 'peredat',
+      description:
+        'Автопередача: перейти в чистую сессию по документу передачи. Вызвать, когда сам решил, что работу пора ' +
+        'передать в чистую сессию (контекст велик, задача на границе шага), — вместо того чтобы писать пользователю ' +
+        '«передаю» или «сделает новая сессия»: без вызова мод может отложить передачу, и сессия будет стоять до ' +
+        'сообщения пользователя. Передача — после конца этого хода; документ передачи мод попросит написать сам.',
+      inputSchema: { type: 'object', properties: {} },
+    })
+    askTool = reg.tool
     if (staleKeys.length) {
       $.ui.toast(
         `autohandoff: в настройках старые пороги в процентах (${staleKeys.join(', ')}) — взяты умолчания в тысячах токенов. Поправьте настройки плагина`,
@@ -769,6 +812,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    if (e.tool === askTool) return { result: await askHandoff($, e) } as never
     const r = await next(e)
     if (e.agentId || e.tool === WRAP_UP) return r
     await rearmIfLow($)
@@ -836,7 +880,9 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const text = b.isPaused
       ? `Передача в чистый контекст на паузе (контекст ${b.ctx} тыс. токенов). Дочитайте и нажмите «Передать».`
-      : `Контекст ${b.ctx} тыс. токенов, задача закончена: через ${b.left} с передам работу в чистый контекст.`
+      : b.isAsked
+        ? `Сессия просит перейти в чистый контекст (контекст ${b.ctx} тыс. токенов): через ${b.left} с передам работу.`
+        : `Контекст ${b.ctx} тыс. токенов, задача закончена: через ${b.left} с передам работу в чистый контекст.`
     return (
       <Box flexDirection="row" gap={1} alignItems="center">
         <Text>{text}</Text>

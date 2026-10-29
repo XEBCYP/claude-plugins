@@ -7,6 +7,8 @@ export type Band = {
   ctx: number
   // Верхний порог пройден: передача без проверки момента
   isDue: boolean
+  // Передачу попросила сама сессия (инструмент `peredat`)
+  isAsked?: boolean
 }
 
 declare module 'claude-code' {
