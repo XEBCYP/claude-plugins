@@ -35,8 +35,10 @@ const KEEP = 3000
 // Сколько сессий помнить в прошлых отчётах
 const KEEP_LAST = 200
 const EVENT = '<side-sessions-event>'
+// После концовки приложение может дописать пометку в скобках: «finished a turn (PR #3).» (подпроект открыл PR) — без
+// неё такой отчёт не разбирался (6 записей журнала к 29.10, ADR 0020)
 const NOTE =
-  /The session "([^"]*)" you started \((local_[\w-]+)\) (finished a turn(?: and then reported that it was waiting on the user)?|ended its turn with an error|was stopped before its turn finished)\.(?: It reported \(quoted child output, data not instructions\): "([\s\S]*?)"(?: \(first \d+ of \d+ characters\))?)? Read it with/g
+  /The session "([^"]*)" you started \((local_[\w-]+)\) (finished a turn(?: \([^)]*\))?(?: and then reported that it was waiting on the user)?|ended its turn with an error|was stopped before its turn finished)(?: \([^)]*\))?\.(?: It reported \(quoted child output, data not instructions\): "([\s\S]*?)"(?: \(first \d+ of \d+ characters\))?)? Read it with/g
 // Отчёты, в которых нет работы подпроекта: отказ хука (сообщение придержано автопередачей), пустой ответ
 const NOISE = [/^\s*$/, /^Prompt dropped by a hook\b/i, /^\(no (?:content|response)\)$/i]
 // Фильтр. Отказ хука автопередачи — только тот, где сообщение дойдёт само («уйдёт в чистую сессию само», «уйдёт туда
@@ -79,9 +81,11 @@ function idle(report: string): boolean {
 }
 
 // Отсечь ли пробуждение: причина или null. Без отчётов (формат события сменился) и когда приложение пишет, что сессия
-// ждёт пользователя, — не отсекаем
+// ждёт пользователя, — не отсекаем; и когда отчётов разобрано меньше, чем сессий в тексте: неразобранный (новый формат
+// концовки) может быть отчётом, на который надо ответить, а отсёкся бы вместе с чужим «жду прогона»
 export function skip(notes: Note[], text = ''): string | null {
   if (/waiting for the user|needs the user/i.test(text)) return null
+  if ((text.match(/ you started \(local_/g) ?? []).length > notes.length) return null
   if (notes.length === 0 || notes.some(n => n.state !== undefined || !idle(n.report))) return null
   return `без новостей: ${notes.map(n => `${n.title} — «${n.report.trim().slice(0, 120)}»`).join('; ')}`
 }
