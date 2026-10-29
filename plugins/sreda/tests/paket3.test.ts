@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { changedPaths, gitRisk } from '../hooks/git'
 import { judge, notesOf, skip } from '../hooks/probuzhdeniya'
+import { SLOVA_NOTE, slovaPrompt } from '../hooks/slova'
 
 // Пакет 3 аудита 27.10 (ADR 0015): защита git, пауза глобальной, журнал пустых пробуждений
 const HOME = 'C:/Users/tester/.claude'
@@ -243,7 +244,43 @@ test('обычная сессия: «поставь на паузу» — про
   engine(on, env)
   await start($)
   await $.prompt.submit({ text: 'поставь на паузу', wait: false, origin: { kind: 'composer' } } as never)
-  expect(env.submits).toEqual(['поставь на паузу'])
+  // Только пометка «слова главнее плана» (hooks/slova.ts), паузы нет
+  expect(env.submits).toEqual([`поставь на паузу\n\n${SLOVA_NOTE}`])
+})
+
+// --- ADR 0021: слова пользователя главнее плана
+
+test('слова главнее плана: пометка — к сообщению пользователя, текст не меняется; к пробуждению и сообщению плагина — нет', async ($, on) => {
+  const env = fresh()
+  engine(on, env)
+  await start($)
+  const r = await $.prompt.submit({ text: 'Выгружай документы за январь', wait: false, origin: { kind: 'composer' } } as never)
+  expect((r as any).text).toBe('Выгружай документы за январь')
+  expect(env.submits[0]).toBe(`Выгружай документы за январь\n\n${SLOVA_NOTE}`)
+  expect(SLOVA_NOTE).toContain('ваши слова: «…» → запускаю')
+  // Пробуждение от сессий и сообщение плагина — не слова пользователя
+  await $.prompt.submit({ text: wake(note('R51', 'local_b', 'R51 is finished, PR #7 opened')), wait: false, origin: { kind: 'unclassified' } } as never)
+  await $.prompt.submit({ text: 'Прочитай документ передачи', wait: false, origin: { kind: 'plugin', name: 'autohandoff' } } as never)
+  expect(env.submits.slice(1).some(t => t.includes(SLOVA_NOTE))).toBe(false)
+  // Пустое сообщение и команда — без пометки
+  expect(slovaPrompt({ text: '  ', origin: { kind: 'composer' } })).toBe(null)
+  expect(slovaPrompt({ text: '/pauza', command: 'pauza', origin: { kind: 'composer' } })).toBe(null)
+  expect(slovaPrompt({ text: 'за январь', origin: { kind: 'bridge' } })).toBe(SLOVA_NOTE)
+  // В жизни пробуждение приходит с origin «sdk» (журнал: 122 из 122) — отличаем по тексту; отчёт субагента — тоже
+  await $.prompt.submit({ text: wake(note('R51', 'local_b', 'Открыл PR #41, жду проверки.')), wait: false, origin: { kind: 'sdk' } } as never)
+  expect(env.submits.at(-1)).not.toContain(SLOVA_NOTE)
+  expect(slovaPrompt({ text: '[Subagent hand-back] Итог проверки…', origin: { kind: 'sdk' } })).toBe(null)
+  expect(SLOVA_NOTE.length).toBeLessThan(260)
+})
+
+test('глобальная на паузе: обе пометки — пауза и «слова главнее плана»', async ($, on) => {
+  const env = fresh()
+  env.files['C:/Projects/Demo/docs/Подпроекты.md'] = '# Реестр'
+  engine(on, env)
+  await start($)
+  await $.prompt.submit({ text: 'Поставь всех на паузу', wait: false, origin: { kind: 'composer' } } as never)
+  expect(env.submits[0]).toContain('Разошли паузу всем подпроектам')
+  expect(env.submits[0]).toContain(SLOVA_NOTE)
 })
 
 // --- R6: пустые пробуждения

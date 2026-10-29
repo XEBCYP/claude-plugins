@@ -5,6 +5,7 @@ import type { Option, Pending } from '../types'
 import { gitCall } from './git'
 import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
+import { slovaPrompt } from './slova'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
 import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
 
@@ -488,12 +489,13 @@ export const register: Register = on => {
   on('command.run', { command: 'pauza' }, async $ => ({ text: await pauzaCommand($, true) }))
   on('command.run', { command: 'prodolzhit' }, async $ => ({ text: await pauzaCommand($, false) }))
 
-  // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts) и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
+  // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts), пометка «слова главнее плана» (hooks/slova.ts)
+  // и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
   on('prompt.submit', async ($, e: any, next) => {
     const drop = await wakeCheck($, e).catch(() => null)
     if (drop) return { drop }
-    const note = await pauzaPrompt($, e)
-    return next(note === null ? e : { ...e, context: [...(e.context ?? []), note] })
+    const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
+    return next(notes.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...notes] })
   })
 
   on('command.run', { command: 'uroven' }, async ($, e) => ({ text: await urovenCommand($, String(e.args ?? '')) }))
