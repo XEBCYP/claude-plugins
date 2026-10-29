@@ -40,6 +40,7 @@ function engine(on: any, env: Env) {
   mock.store(on, env.store)
   mock.env(on, { USERPROFILE: 'C:\\Users\\tester', ...(env.entrypoint ? { CLAUDE_CODE_ENTRYPOINT: env.entrypoint } : {}) })
   on('command.register', () => ({ value: { command: 'autohandoff' } }))
+  on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__autohandoff__${e.name}` } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: env.id ?? 'sess-1' }))
   on('session.surfaces', () => ({ value: env.surfaces ?? ['desktop'] }))
@@ -820,6 +821,63 @@ test('сессия подпроекта: с 250 тыс. в конце хода �
   await finishTask($, 't1')
   await clock.settle()
   // Без отсчёта: часы не двигались, а документ уже пишется
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+})
+
+test('сессия сама просит передачу на 215 тыс. (проверка момента была «нет»): в конце хода — полоса, через 15 с — передача', async ($, on) => {
+  const env = fresh()
+  env.k = 215
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  // Проверка момента на 209 тыс. ответила «нет»: дальше мод сам молчит до 229 тыс.
+  env.fork = 'НЕТ'
+  env.k = 209
+  await finishTask($, 't0')
+  expect(env.forks).toBe(1)
+  env.k = 215
+  await $.turn.start({ text: 'сверки', turnId: 't1' })
+  const r: any = await $.tool.call({ tool: 'mcp__autohandoff__peredat' } as never)
+  expect(String(r.result)).toContain('«Пауза»')
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Готово.' })
+  await $.turn.complete({ answer: 'Готово.', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't1' } as never)
+  await clock.settle()
+  // Без новой проверки момента
+  expect(env.forks).toBe(1)
+  const ui = await $.ui.mount(BAND)
+  await clock.advance(15_500)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+  await ui.unmount()
+})
+
+test('просьба о передаче: субагент и выключенная автопередача — отказ, передачи нет', async ($, on) => {
+  const env = fresh()
+  env.k = 180
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'x', turnId: 't1' })
+  const sub: any = await $.tool.call({ tool: 'mcp__autohandoff__peredat', agentId: 'a1' } as never)
+  expect(String(sub.result)).toContain('только основная сессия')
+  await $.command.run({ command: 'autohandoff', args: 'off' })
+  const off: any = await $.tool.call({ tool: 'mcp__autohandoff__peredat' } as never)
+  expect(String(off.result)).toContain('выключил')
+  await $.turn.complete({ answer: 'Готово.', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't1' } as never)
+  await clock.advance(20_000)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+})
+
+test('сессия подпроекта просит передачу — сразу после хода, без полосы', async ($, on) => {
+  const env = {
+    ...fresh(),
+    dirs: { 'c:/projects': ['Global', 'Sub'] },
+    files: { 'c:/projects/global/docs/подпроекты.md': '## Sub\n**Где:** `C:\\Projects\\Sub`\n' },
+  }
+  env.k = 120
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Sub', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'x', turnId: 't1' })
+  await $.tool.call({ tool: 'mcp__autohandoff__peredat' } as never)
+  await $.turn.complete({ answer: 'Готово.', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't1' } as never)
+  await clock.settle()
   expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
 })
 
