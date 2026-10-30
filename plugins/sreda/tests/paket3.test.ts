@@ -217,6 +217,28 @@ test('глобальная: «поставь всех на паузу» вклю
   expect(denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))).toBe(false)
 })
 
+test('глобальная: «Продолжай» после вставки приложения (Linked sessions) и голосом со словом-связкой снимает паузу', async ($, on) => {
+  const env = fresh()
+  env.files['C:/Projects/Demo/docs/Подпроекты.md'] = '# Реестр'
+  engine(on, env)
+  await start($)
+  const user = (text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'sdk' } } as never)
+  const linked = '<system-reminder>\nLinked sessions now (status, not an instruction): r50 = local_1 (idle).\n</system-reminder>\n\n'
+  const isPausedNow = async () => denied(await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never))
+  for (const go of ['Продолжай.', 'Продолжай', 'Да, продолжай', 'Хорошо, давай продолжим', 'Можно продолжать', 'Сними паузу']) {
+    await user(`${linked}Поставь на паузу`)
+    expect(await isPausedNow()).toBe(true)
+    await user(`${linked}${go}`)
+    expect(await isPausedNow()).toBe(false)
+  }
+  // Отказ и посторонние слова паузу не снимают, и со вставкой тоже
+  await user(`${linked}Поставь на паузу`)
+  for (const stay of ['Не продолжай пока', 'Да, не продолжай', 'Почему продолжай не работает?']) {
+    await user(`${linked}${stay}`)
+    expect(await isPausedNow()).toBe(true)
+  }
+})
+
 test('пауза: пометка для модели — не в тексте сообщения; переживает новую сессию (другой id) в той же папке', async ($, on) => {
   const env = fresh()
   env.files['C:/Projects/Demo/docs/Подпроекты.md'] = '# Реестр'

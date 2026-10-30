@@ -123,6 +123,18 @@ test('на длинной переписке разовая простая пр�
   expect(env.efforts).toEqual(['high', 'medium'])
 })
 
+test('вставка приложения перед словами пользователя не делает сообщение «не задачей»; одна вставка — не задача', async ($, on) => {
+  const env = await start($, on)
+  const linked = '<system-reminder>\nLinked sessions now (status, not an instruction): r50 = local_1 (idle).\n</system-reminder>\n\n'
+
+  await turn($, `${linked}Почему не сходятся остатки по складу? Разберись и исправь.`)
+  await step($)
+  await turn($, linked)
+  await step($)
+
+  expect(env.efforts).toEqual(['high', 'high'])
+})
+
 test('не задача пользователя и похожие слова — уровень не скачет', async ($, on) => {
   const env = await start($, on)
 
