@@ -14,8 +14,11 @@ ilex пускает под одной учёткой один вход: новы
   python ilex.py doc <ссылка> [--find "<слова>"] [--max 20000]
                                              — текст документа; --find — только куски вокруг слов
 
+  status только смотрит, есть ли вход, и никогда не входит сама.
+
 Коды выхода: 0 — готово; 2 — нет учётных данных «ilex» в Windows; 3 — вход потерян, а войти снова
-пока нельзя (лимит); 4 — ilex не пустил (неверный пароль, подписка); 5 — страница не загрузилась.
+пока нельзя (лимит); 4 — ilex не пустил (неверный пароль, подписка); 5 — страница не загрузилась;
+6 — другая сессия занимает ilex дольше LOCK_WAIT_S.
 """
 
 import argparse
@@ -29,10 +32,13 @@ import sys
 import time
 import urllib.parse
 
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
+
 BASE = "https://ilex-private.ilex.by"
 LOGIN_URL = BASE + "/public/service-login"
 CRED_TARGET = "ilex"
 MIN_RELOGIN_MINUTES = 60
+LOCK_WAIT_S = 90  # меньше тайм-аута команды в сессии (120 с по умолчанию)
 
 HOME = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ilex-client")
 PROFILE = os.path.join(HOME, "profile")
@@ -81,18 +87,23 @@ def read_credential():
         advapi.CredFree(ptr)
 
 
+class Busy(Exception):
+    pass
+
+
 class Lock:
     """Одна программа за раз: профиль браузера нельзя открыть дважды."""
 
     def __enter__(self):
         self.f = open(LOCK, "a+")
-        for _ in range(240):
+        for _ in range(LOCK_WAIT_S * 2):
             try:
                 msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
                 return self
             except OSError:
                 time.sleep(0.5)
-        raise SystemExit("ilex: другая сессия занимает ilex больше 2 минут — повторите позже")
+        self.f.close()
+        raise Busy()
 
     def __exit__(self, *a):
         self.f.seek(0)
@@ -101,14 +112,29 @@ class Lock:
 
 
 def on_login_page(page):
-    return "/public/service-login" in page.url or "/public/login" in page.url
+    """Вход потерян: страница входа или окно «под учёткой вошли в другом месте» (il-forced-logout-dialog)."""
+    if "/public/service-login" in page.url or "/public/login" in page.url:
+        return True
+    return page.locator(".forced-logout-dialog").count() > 0
 
 
-def ensure_login(page, state):
-    """Открыть главную; вход потерян — войти, если лимит позволяет. Возвращает код выхода или 0."""
+def settle(page, seconds=6):
+    """Подождать, не уведёт ли сайт на страницу входа (переадресация бывает не сразу). True — вход потерян."""
+    for _ in range(seconds * 2):
+        if on_login_page(page):
+            return True
+        page.wait_for_timeout(500)
+    return on_login_page(page)
+
+
+def check_login(page):
     page.goto(BASE + "/home", wait_until="domcontentloaded")
-    page.wait_for_timeout(2500)
-    if not on_login_page(page):
+    return not settle(page)
+
+
+def ensure_login(page, state, lost=False):
+    """Вход потерян (lost или видно по главной) — войти, если лимит позволяет. Возвращает код выхода или 0."""
+    if not lost and check_login(page):
         return 0
     last = state.get("last_login")
     if last:
@@ -136,18 +162,21 @@ def ensure_login(page, state):
     page.click("button[type=submit]:has-text('Войти в сервис')")
     # Под учёткой уже кто-то вошёл — ilex спрашивает, завершить ли его вход («Продолжить» / «Отмена»).
     kicked = False
-    for _ in range(40):
+    for _ in range(60):
         page.wait_for_timeout(500)
-        if not on_login_page(page):
+        if "/public/" not in page.url:
             break
         cont = page.locator("mat-dialog-container button:has-text('Продолжить')")
         if not kicked and cont.count():
             cont.first.click()
             kicked = True
             log("под учёткой уже был вход — завершила его («Продолжить»)")
-    state["last_login"] = dt.datetime.now().isoformat(timespec="seconds")
-    save_state(state)
-    if on_login_page(page):
+    # Лимит считает входы, которые могли выбить другого: удачный вход или нажатое «Продолжить».
+    # Неудачный вход без «Продолжить» никого не выбил и не блокирует попытку после нового cmdkey.
+    if kicked or "/public/" not in page.url:
+        state["last_login"] = dt.datetime.now().isoformat(timespec="seconds")
+        save_state(state)
+    if "/public/" in page.url:
         err = page.evaluate("() => document.body.innerText.slice(0, 300)")
         log("вход не удался")
         print("ilex: не пустил после ввода учётных данных (неверный пароль или подписка). Страница: "
@@ -162,13 +191,20 @@ def wait_text(page, markers, timeout_s=25):
         text = page.evaluate("() => document.body.innerText")
         if any(m in text for m in markers):
             return text
+        if on_login_page(page):
+            return None
         page.wait_for_timeout(500)
     return None
+
+
+LOST = "lost"
 
 
 def cmd_search(page, query, n):
     page.goto(BASE + "/search?query=" + urllib.parse.quote(query), wait_until="domcontentloaded")
     text = wait_text(page, ["Найдено документов", "ничего не найдено"])
+    if text is None and on_login_page(page):
+        return LOST
     if text is None:
         print("ilex: выдача не загрузилась за 25 с")
         return 5
@@ -192,7 +228,8 @@ def cmd_doc(page, url, find, max_chars):
     if url.startswith("/"):
         url = BASE + url
     page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_timeout(4000)
+    if settle(page, 4):
+        return LOST
     # Длинный документ подгружается частями при прокрутке — крутим, пока текст растёт.
     prev = -1
     for _ in range(30):
@@ -203,19 +240,26 @@ def cmd_doc(page, url, find, max_chars):
             break
         prev = length
         page.wait_for_timeout(1200)
+    if on_login_page(page):
+        return LOST
     text = page.evaluate("() => document.body.innerText")
-    if find:
-        words = [w.lower() for w in find.split() if w]
+    if len(text.strip()) < 300:
+        print(f"{page.url}\nilex: документ не загрузился (на странице {len(text.strip())} знаков)")
+        return 5
+    words = [w.lower() for w in (find or "").split()]
+    if words:
         low = text.lower()
         hits, pos = [], 0
         while len(hits) < 15:
             j = low.find(words[0], pos)
             if j < 0:
                 break
-            window = low[max(0, j - 600):j + 1200]
-            if all(w in window for w in words):
-                hits.append(text[max(0, j - 600):j + 1200].strip())
-            pos = j + 1
+            a, b = max(0, j - 600), j + 1200
+            if all(w in low[a:b] for w in words):
+                hits.append(text[a:b].strip())
+                pos = b  # следующий кусок — после этого, без повторов
+            else:
+                pos = j + 1
         print(f"{page.url}\nСовпадений «{find}»: {len(hits)}")
         for h in hits:
             print("\n=====\n" + h)
@@ -243,9 +287,19 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(HOME, exist_ok=True)
-    from playwright.sync_api import sync_playwright
+    try:
+        with Lock():
+            return run(args)
+    except Busy:
+        print(f"ilex: другая сессия занимает ilex дольше {LOCK_WAIT_S} с — повторите позже")
+        return 6
+    except PlaywrightError as e:
+        print("ilex: страница не загрузилась: " + str(e).splitlines()[0])
+        return 5
 
-    with Lock(), sync_playwright() as p:
+
+def run(args):
+    with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(PROFILE, channel="msedge", headless=True,
                                                    viewport={"width": 1400, "height": 1000})
         try:
@@ -253,17 +307,26 @@ def main():
             page.set_default_timeout(30000)
             state = load_state()
             if args.cmd == "status":
-                code = ensure_login(page, state) if read_credential() else None
-                print(json.dumps({"учётные_данные_windows": bool(read_credential()),
-                                  "вход": code == 0, "программа_входила": state.get("last_login")},
-                                 ensure_ascii=False))
-                return 0 if code == 0 else (code or 2)
+                ok = check_login(page)
+                print(json.dumps({"учётные_данные_windows": bool(read_credential()), "вход": ok,
+                                  "программа_входила": state.get("last_login")}, ensure_ascii=False))
+                return 0 if ok else 3
             code = ensure_login(page, state)
             if code:
                 return code
-            if args.cmd == "search":
-                return cmd_search(page, args.query, args.n)
-            return cmd_doc(page, args.url, args.find, args.max)
+            for attempt in range(2):
+                if args.cmd == "search":
+                    code = cmd_search(page, args.query, args.n)
+                else:
+                    code = cmd_doc(page, args.url, args.find, args.max)
+                if code != LOST:
+                    return code
+                if attempt == 0:  # вход потеряли по дороге — войти (если лимит позволяет) и повторить раз
+                    code = ensure_login(page, state, lost=True)
+                    if code:
+                        return code
+            print("ilex: вход теряется сразу после входа — повторите позже")
+            return 3
         finally:
             ctx.close()
 
