@@ -13,8 +13,8 @@ ilex пускает под одной учёткой один вход: новы
   python ilex.py status                      — есть ли вход, когда программа входила последний раз
   python ilex.py search "<запрос>" [--n 15]  — «Найдено документов», обзор ilex и ссылки выдачи
   python ilex.py doc <ссылка> [--find "<слова>"] [--max 20000] [--full] [--out <файл>]
-                                             — текст документа; --full — весь (экспорт в Word, запас —
-                                               прокрутка); --find — куски вокруг слов по всему тексту;
+                                             — весь текст документа (экспорт в Word, запас — прокрутка);
+                                               --full — для совместимости; --find — куски вокруг слов;
                                                --out — весь текст в файл
   python ilex.py doc <ссылка> --links [--find "<слова>"]
                                              — абзацы с сегментами и ссылки документа (тип, адрес)
@@ -250,9 +250,15 @@ def open_doc(page, url):
     page.goto(full_url(url), wait_until="domcontentloaded")
     if settle(page, 4):
         return LOST
-    for _ in range(40):  # текст подгружается после открытия: ждать, пока станет длиннее оглавления
-        if page.evaluate("() => document.body.innerText.length") > 3000:
+    prev, still = -1, 0
+    for _ in range(40):  # текст подгружается после открытия: ждать, пока станет длиннее оглавления или перестанет расти
+        size = page.evaluate("() => document.body.innerText.length")
+        if size > 3000:
             break
+        still = still + 1 if size == prev and size > 300 else 0
+        if still >= 4:  # короткий документ (письмо, ответ) — 2 с без роста, дальше не ждать
+            break
+        prev = size
         page.wait_for_timeout(500)
     if on_login_page(page):
         return LOST
@@ -290,13 +296,17 @@ def rtf_to_text(data):
         elif brace == "}":
             flush()
             skip, uc = stack.pop() if stack else (False, 1)
+            drop = 0
         elif hx:
             if drop:
                 drop -= 1
             elif not skip:
                 buf.extend(bytes.fromhex(hx))
         elif sym:
-            if sym == "*":
+            if sym in "\r\n" and not skip:  # «\» с переводом строки — то же, что \par
+                flush()
+                out.append("\n")
+            elif sym == "*":
                 skip = True
             elif not skip and sym in "\\{}":
                 flush()
@@ -317,7 +327,7 @@ def rtf_to_text(data):
             elif word in ("tab", "cell"):
                 flush()
                 out.append("\t")
-            elif word == "u":
+            elif word == "u" and arg:
                 flush()
                 v = int(arg)
                 out.append(chr(v + 65536 if v < 0 else v))
@@ -346,7 +356,7 @@ def text_by_word(page):
         dl.value.save_as(path)
         with open(path, "rb") as f:
             text = rtf_to_text(f.read())
-    except PlaywrightError:
+    except (PlaywrightError, ValueError, TypeError, IndexError, OSError):  # не скачался или не разобрался — прокрутка
         return None
     finally:
         if os.path.exists(path):
@@ -362,20 +372,33 @@ STEP_DOWN = """() => { const e = document.querySelector('[data-ilex-walk]'); con
     e.scrollTop = before + e.clientHeight * 0.8; return e.scrollTop === before; }"""
 
 
-def walk(page, collect_js, steps=400):
-    """Прокрутить текст документа сверху вниз по 0,8 экрана, на каждом шаге вызывая collect_js."""
+WALK_LIMIT_S = 150  # вместе со входом и экспортом в Word укладывается в тайм-аут команды 300 с
+
+
+def walk(page, collect_js, steps=400, limit_s=WALK_LIMIT_S):
+    """Прокрутить текст документа сверху вниз по 0,8 экрана, на каждом шаге вызывая collect_js.
+    True — дошли до конца, False — остановились по числу шагов или времени (конец не собран)."""
     if not page.evaluate(MARK_CONTAINER):
         page.evaluate(collect_js)
-        return
+        return True
     page.evaluate("() => { document.querySelector('[data-ilex-walk]').scrollTop = 0; }")
     page.wait_for_timeout(1500)
+    end, done = time.monotonic() + limit_s, False
     for _ in range(steps):
         page.evaluate(collect_js)
         if page.evaluate(STEP_DOWN):
+            done = True
+            break
+        if time.monotonic() > end:
             break
         page.wait_for_timeout(700)
     page.wait_for_timeout(700)
     page.evaluate(collect_js)
+    return done
+
+
+NOT_TO_END = ("\n[ВНИМАНИЕ: прокрутка остановлена по времени — конец документа не собран; нужный пункт — "
+              "через --find (идёт экспортом в Word) или по абзацу #M<сегмент>]")
 
 
 WALK_TEXT = """() => { const w = window.__ilexText = window.__ilexText || {seen: new Set(), lines: []};
@@ -385,8 +408,9 @@ WALK_TEXT = """() => { const w = window.__ilexText = window.__ilexText || {seen:
 
 
 def text_by_scroll(page):
-    walk(page, WALK_TEXT)
-    return "\n".join(page.evaluate("() => window.__ilexText ? window.__ilexText.lines : []"))
+    """Текст прокруткой и признак, что дошли до конца."""
+    done = walk(page, WALK_TEXT)
+    return "\n".join(page.evaluate("() => window.__ilexText ? window.__ilexText.lines : []")), done
 
 
 # --- Ссылки документа и абзацы с номерами (сегментами) ---
@@ -420,7 +444,9 @@ LINK_TYPES = ("Типы: РДД — акт, которым внесено изм
 
 
 def print_links(page, words, max_chars):
-    walk(page, WALK_LINKS)
+    done = walk(page, WALK_LINKS)
+    if on_login_page(page):  # вход потерян по дороге — ничего не печатать, иначе повтор выведет список дважды
+        return LOST
     data = page.evaluate("() => window.__ilexLinks || {links: {}, paras: {}}")
     links = sorted(data["links"].values(), key=lambda x: x["o"])
     paras = sorted(data["paras"].items(), key=lambda x: x[1][0])
@@ -446,9 +472,13 @@ def print_links(page, words, max_chars):
         mark = "+" if x["extra"] else " "
         lines.append(f"{mark}M{x['seg'] or '—'} | {x['type'] or '—'} | {x['text'][:70]} | {addr}")
     out = "\n".join(lines)
+    print(page.url)
     print(out[:max_chars])
     if len(out) > max_chars:
         print(f"\n[обрезано: показано {max_chars} из {len(out)} знаков; сузить — --find, больше — --max]")
+    if not done:
+        print(NOT_TO_END)
+    return 0
 
 
 def cmd_doc(page, url, find, max_chars, full, links, out):
@@ -457,16 +487,15 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
         return code
     words = [w.lower() for w in (find or "").split()]
     if links:
-        print(page.url)
-        print_links(page, words, max_chars)
-        return LOST if on_login_page(page) else 0
-    how = "страница"
-    if full or find or out:  # искать и сохранять — только по всему тексту: страница отдаёт не всё
-        text, how = text_by_word(page), "экспорт в Word"
-        if text is None:
-            text, how = text_by_scroll(page), "прокрутка (Word не скачался; оглавление и повторы могут смешаться)"
-    else:
-        text = page.evaluate("() => document.body.innerText")
+        if out or full:
+            print("ilex: --links выводит список ссылок; --out и --full с ним не действуют")
+        return print_links(page, words, max_chars)
+    # Всегда весь текст: страница подгружает длинный документ частями и середину теряет. --full оставлен для
+    # совместимости и только добавляет строку «как получен текст».
+    text, how, done = text_by_word(page), "экспорт в Word", True
+    if text is None:
+        text, done = text_by_scroll(page)
+        how = "прокрутка (Word не скачался; оглавление и одинаковые строки вроде «Исключен.» могут смешаться)"
     if on_login_page(page):
         return LOST
     if out:
@@ -474,6 +503,8 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
             f.write(text)
         print(f"{page.url}\nВесь текст ({how}): {len(text)} знаков → {out}")
         if not words:
+            if not done:
+                print(NOT_TO_END)
             return 0
     if words:
         low = text.lower()
@@ -491,12 +522,15 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
         print(f"{page.url}\nТекст: {how}, {len(text)} знаков. Совпадений «{find}»: {len(hits)}")
         for h in hits:
             print("\n=====\n" + h)
+        if not done:
+            print(NOT_TO_END)
         return 0
-    print(page.url + (f"\nТекст: {how}, {len(text)} знаков" if full else ""))
+    print(f"{page.url}\nТекст: {how}, {len(text)} знаков")
     print(text[:max_chars])
     if len(text) > max_chars:
-        tail = "нужный пункт — через --find" + ("" if full else "; без --full середина может быть не загружена")
-        print(f"\n[обрезано: показано {max_chars} из {len(text)} знаков; {tail}]")
+        print(f"\n[обрезано: показано {max_chars} из {len(text)} знаков; нужный пункт — через --find]")
+    if not done:
+        print(NOT_TO_END)
     return 0
 
 
@@ -532,7 +566,9 @@ def parse_target(url, seg):
     m = re.search(r"/(?:view-document|backlinks|editions)/([A-Z]+)/(\d+)(?:/(\d+))?", url)
     if not m:
         return None
-    s = (seg or "").lstrip("Mm") or (m.group(3) if "/backlinks/" in url else None)
+    if seg and not re.fullmatch(r"#?[Mm]?\d+", seg.strip()):
+        return None
+    s = (seg or "").strip().lstrip("#Mm") or (m.group(3) if "/backlinks/" in url else None)
     if not s:
         h = re.search(r"#M(\d+)", url)
         s = h.group(1) if h and h.group(1) != "100001" else None  # #M100001 — начало документа, не абзац
@@ -582,7 +618,7 @@ def click_tab(page, name):
 def cmd_backlinks(page, url, seg, tab, pg, n):
     target = parse_target(full_url(url), seg)
     if not target:
-        print("ilex: нужен адрес документа вида /view-document/BELAW/<номер>[#M<сегмент>]")
+        print("ilex: нужен адрес документа вида /view-document/BELAW/<номер>[#M<сегмент>], --seg — M<цифры>")
         return 5
     ib, doc, s = target
     list_url = f"{BASE}/backlinks/{ib}/{doc}" + (f"/{s}" if s else "")
@@ -591,7 +627,8 @@ def cmd_backlinks(page, url, seg, tab, pg, n):
         return code
     text = page.evaluate("() => document.body.innerText")
     i = text.find("Дополнительная информация к")
-    head = text[i:text.find("\nВсе", i)].strip() if i >= 0 else ""
+    j = text.find("\nВсе", i) if i >= 0 else -1
+    head = text[i:j if j > 0 else i + 300].strip() if i >= 0 else ""
     print(page.url + "\n" + head)
     if not tab:  # сколько в каждой вкладке — чтобы решить, куда смотреть
         counts = []
