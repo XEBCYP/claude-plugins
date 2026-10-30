@@ -588,6 +588,54 @@ test('две нормальные передачи за час не выбира
   expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(3)
 })
 
+test('передача без сообщения: первый ход чистой сессии — вся работа (с 45 до 200 тыс.) — не по кругу', { options: { perHour: 1 } }, async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  for (const tag of ['a', 'b']) {
+    // Полоса досчитала — передача без сообщения пользователя
+    await finishTask($, `${tag}-task`)
+    await clock.advance(16_000)
+    await $.turn.start({ text: '', turnId: `${tag}-w` })
+    env.written = clock.now()
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: `${tag}-w` } as never)
+    await clock.settle()
+    // Чистая сессия: один ход — прочитать документ (первое действие — запрос до документа) и работать дальше
+    env.k = 30
+    await $.turn.start({ text: 'Прочитай документ передачи и продолжай', turnId: `${tag}-f` })
+    await $.tool.call({ tool: 'Read', file_path: 'doc' } as never)
+    env.k = 45
+    await $.tool.call({ tool: 'Read', file_path: 'a' } as never)
+    env.k = tag === 'a' ? 200 : 208
+    await $.turn.complete({ answer: 'Готово.', durationMs: 1, isAborted: false, reason: 'answer', turnId: `${tag}-f` } as never)
+    await clock.settle()
+  }
+  expect(env.commands.filter(c => c.startsWith('autohandoff:write')).length).toBe(2)
+  const status = await $.command.run({ command: 'autohandoff', args: 'status' } as never)
+  expect(String((status as any).text)).toContain('по кругу 0')
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: /208 тыс\./ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('неудачная попытка по кругу считается один раз', { options: { perHour: 2 } }, async ($, on) => {
+  const env = fresh()
+  env.k = 300
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await handoffDone($, clock, env, 'a')
+  // Чистая сессия ни разу не ниже 150 тыс.: попытка по кругу, документ не записан — отмена
+  env.k = 240
+  env.written = null
+  await finishTask($, 'b')
+  await clock.advance(16_000)
+  await $.turn.start({ text: '', turnId: 'b-w' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'b-w' } as never)
+  await clock.settle()
+  const status = await $.command.run({ command: 'autohandoff', args: 'status' } as never)
+  expect(String((status as any).text)).toContain('по кругу 0, неудачных 1')
+})
+
 test('две удачные передачи за час не отключают жёсткий предел', async ($, on) => {
   const env = { ...fresh(), aborted: [] as string[] }
   const clock = engine(on, env)

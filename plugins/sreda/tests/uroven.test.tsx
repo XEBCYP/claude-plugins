@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Уровень усилий (hooks/uroven.ts). Хуки теста стоят за движок: запоминают, с каким уровнем ушёл запрос к модели и с
 // какими параметрами — вызов агента или подпроекта.
-type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number; files: Record<string, string> }
+type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number; files: Record<string, string>; config?: string }
 
 function engine(on: any, env: Env) {
   mock.clock(on, { now: 1_000_000 })
@@ -16,6 +16,8 @@ function engine(on: any, env: Env) {
     return { value: undefined }
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  // Уровень по умолчанию в настройках программы
+  on('config.list', () => ({ value: env.config ? [{ key: 'effortLevel', value: env.config }] : [] }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
   on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: { tokens: env.tokens, window: 1_000_000 } } }))
@@ -389,4 +391,24 @@ test('ручной режим проекта: «Авто» пишет в фай�
   await turn($, 'Почему падает тест?')
   await step($, 'xhigh')
   expect(env.efforts.at(-1)).toBe('high')
+})
+
+test('«Авто» держится и после перезагрузки плагина, когда в настройках программы другой уровень', async ($, on) => {
+  const env = await start($, on)
+  env.config = 'medium'
+  await turn($, 'Покажи статус ветки.')
+  await step($, 'medium')
+  await step($, 'high')
+  const ui = await $.ui.mount(BAND as any)
+  await ui.press({ key: 'avto' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await ui.unmount()
+
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'high')
+  expect(env.efforts.at(-1)).toBe('medium')
+  const again = await $.ui.mount(BAND as any)
+  expect(await again.find({ type: 'Text', text: /вручную/ })).toBeUndefined()
+  await again.unmount()
 })

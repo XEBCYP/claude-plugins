@@ -216,7 +216,8 @@ export async function urovenCommand($: any, args: string): Promise<string> {
 }
 
 // Кнопка «Авто» на полосе ручного режима: ручной режим проекта — как /uroven авто (файл проекта), ручной режим
-// сессии — забыть его. Уровень программы забываем: иначе следующий запрос с ним же счёлся бы новым выбором пользователя
+// сессии — забыть его. Уровень программы (picked) помним: следующий запрос с ним же — не новый выбор пользователя, а
+// забытый после перезагрузки плагина подменился бы уровнем из настроек, и первый запрос снова включил бы ручной режим
 export async function toAuto($: any): Promise<string> {
   let text = '«Среда» снова выбирает уровень сама.'
   if (manual === 'project') {
@@ -224,8 +225,6 @@ export async function toAuto($: any): Promise<string> {
     if (manual) return text
   }
   manual = undefined
-  picked = undefined
-  lastModel = undefined
   lowerAsked = undefined
   shown = ''
   show($)

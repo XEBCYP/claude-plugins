@@ -88,9 +88,11 @@ type Mark = {
   // Попытки по кругу: из чистой сессии, контекст которой в конце хода ни разу не был ниже `from`. Ниже `to` лимит в
   // час считает их и неудачные; нормальные передачи (сессия поработала с малым контекстом и выросла) — нет
   loops?: number[]
-  // Чистая сессия после /clear: наименьший контекст в конце хода, тыс. токенов; null — ход ещё не кончился.
-  // Нет поля — сессия началась не с передачи, её попытки не по кругу
+  // Чистая сессия после /clear: наименьший контекст в конце хода и после действий, тыс. токенов; null — замеров ещё
+  // не было (тогда попытка не по кругу). Нет поля — сессия началась не с передачи, её попытки не по кругу
   lowK?: number | null
+  // Первое действие чистой сессии ещё впереди: его замер — запрос до чтения документа передачи, его не берём
+  lowSkip?: boolean
   // Неудачные попытки (документ не записан, команда не запустилась): с `to` и у жёсткого предела лимит в час
   // считает только их — удачные передачи 28.10 выбирали лимит, и сессия Export1c7 ушла за 300 тыс. без передачи
   fails?: number[]
@@ -236,9 +238,8 @@ async function recentTimes($: Dollar): Promise<number[]> {
   return (mark.times ?? []).filter(t => now - t < HOUR)
 }
 
-async function noteTime($: Dollar): Promise<void> {
-  const now = await $.clock.now()
-  const isLoop = mark.lowK !== undefined && (mark.lowK === null || mark.lowK >= from)
+async function noteTime($: Dollar, now: number): Promise<void> {
+  const isLoop = typeof mark.lowK === 'number' && mark.lowK >= from
   mark = { ...mark, times: [...(await recentTimes($)), now], ...(isLoop ? { loops: [...(await recentLoops($)), now] } : {}) }
   await save($)
 }
@@ -246,6 +247,19 @@ async function noteTime($: Dollar): Promise<void> {
 async function recentLoops($: Dollar): Promise<number[]> {
   const now = await $.clock.now()
   return (mark.loops ?? []).filter(t => now - t < HOUR)
+}
+
+// Замер для признака круга: в конце хода и после действий основного цикла, кроме первого действия чистой сессии.
+// Только конец хода не годился: без сообщения пользователя первый ход чистой сессии — вся работа, и к его концу
+// контекст уже выше `from`, хотя начинался с 45 тыс.
+async function noteLow($: Dollar, isStep: boolean): Promise<void> {
+  if (mark.lowK === undefined) return
+  if (isStep && mark.lowSkip) {
+    mark = { ...mark, lowSkip: false }
+  } else {
+    mark = { ...mark, lowSkip: false, lowK: Math.min(mark.lowK ?? Infinity, await contextK($)) }
+  }
+  await save($)
 }
 
 async function recentFails($: Dollar): Promise<number[]> {
@@ -360,9 +374,10 @@ async function handoffPath($: Dollar): Promise<string> {
 async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false): Promise<void> {
   if (mark.pending) return
   const path = await handoffPath($)
-  mark = { ...mark, isArmed: false, pending: { path, startedAt: await $.clock.now(), writeTurnId: null, held, ctx, isCut } }
+  const startedAt = await $.clock.now()
+  mark = { ...mark, isArmed: false, pending: { path, startedAt, writeTurnId: null, held, ctx, isCut } }
   await save($)
-  await noteTime($)
+  await noteTime($, startedAt)
   // Если ход записи так и не начался, отмена по времени не должна ждать следующего хода
   void $.clock.after(WAIT_MS + 1000, () => void checkPending($, null))
   const users = held.filter(one => one.isUser).map(one => one.text)
@@ -387,7 +402,9 @@ async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false)
 async function cancelHandoff($: Dollar, why: string): Promise<void> {
   const p = mark.pending
   if (!p) return
-  mark = { ...mark, pending: null, isArmed: true, fails: [...(await recentFails($)), await $.clock.now()] }
+  // Неудачная попытка — в неудачных; из попыток по кругу её убираем, иначе одна неудача считалась бы дважды
+  const loops = (mark.loops ?? []).filter(t => t !== p.startedAt)
+  mark = { ...mark, pending: null, isArmed: true, loops, fails: [...(await recentFails($)), await $.clock.now()] }
   await save($)
   $.ui.toast(`${why} (${p.path}) — передача отменена`)
   await resubmit($, p.held)
@@ -409,7 +426,7 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
     await $.command.run({ command: 'clear' })
     // После /clear у диалога может смениться id: отметка — с нуля; включится снова, когда контекст спадёт
     cliId = await $.session.id()
-    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times, fails: mark.fails, loops: mark.loops, lowK: null }
+    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times, fails: mark.fails, loops: mark.loops, lowK: null, lowSkip: true }
     await save($)
     const held = p.held.map(asHeld)
     if (held.some(one => one.isUser)) {
@@ -683,10 +700,9 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
 
 async function noteTurnEnd($: Dollar, isAborted: boolean, turnId: string): Promise<void> {
   isTurnRunning = false
-  // Чистая сессия: наименьший контекст в конце хода — по нему попытка передачи считается «по кругу» или нет.
-  // Начало хода не годится: первый ход начинается до чтения документа передачи
-  const low = mark.lowK === undefined ? {} : { lowK: Math.min(mark.lowK ?? Infinity, await contextK($)) }
-  mark = { ...mark, ...low, lastTurn: { isAborted, wrap: turnWrap } }
+  // Начало хода для признака круга не годится: первый ход начинается до чтения документа передачи
+  await noteLow($, false)
+  mark = { ...mark, lastTurn: { isAborted, wrap: turnWrap } }
   await save($)
   await checkPending($, turnId)
   void afterTurn($, isAborted)
@@ -834,6 +850,7 @@ export const register: Register = (on, options) => {
     if (e.tool === askTool) return { result: await askHandoff($, e) } as never
     const r = await next(e)
     if (e.agentId || e.tool === WRAP_UP) return r
+    await noteLow($, true)
     await rearmIfLow($)
     const cut = await cutTurn($)
     if (cut) return { ...r, context: [...(r.context ?? []), cut] }
