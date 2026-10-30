@@ -12,6 +12,7 @@
 // когда пользователь сменил уровень в программе посреди сессии (e.effort запроса — настройка сессии, не наша подмена).
 
 import { showEffort } from './stroka'
+import { ownText } from './tekst'
 
 export type Level = 'medium' | 'high' | 'xhigh'
 
@@ -65,7 +66,9 @@ const ORDERED = /^\s*Effort:\s*(low|medium|high|xhigh|max)\b/im
 // Один признак сложности — «высокий», два и больше — «сверхвысокий»; без признаков — «средний» (механика тоже).
 // undefined — сообщение ничего не говорит о сложности (короткий ответ посреди работы): уровень не трогаем.
 export function judge(text: string): Level | undefined {
-  const t = text.trim()
+  // Вставка приложения перед словами пользователя («Linked sessions now») — не его текст: без неё сообщение глобальной
+  // сессии начиналось с «<» и считалось не задачей
+  const t = ownText(text)
   if (!t || NOT_TASK.test(t)) return undefined
   const ordered = ORDERED.exec(t)
   if (ordered) return clamp(ordered[1].toLowerCase())
