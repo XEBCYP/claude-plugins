@@ -6,7 +6,8 @@
 
 ilex пускает под одной учёткой один вход: новый вход закрывает прежний (код сервера 971, окно
 «принудительный выход»). Учёткой пользуются и у заказчика, поэтому программа входит только когда вход
-потерян и не чаще раза в MIN_RELOGIN_MINUTES — иначе она и сотрудник заказчика выбивали бы друг друга.
+потерян. MIN_RELOGIN_MINUTES — не чаще раза в столько минут; 0 — без ограничения (так решил пользователь:
+«сейчас любое количество раз» (пользователь, 30.10.2026)). Поставить 60, если сотрудники заказчика пожалуются, что их выбивает.
 
 Команды:
   python ilex.py status                      — есть ли вход, когда программа входила последний раз
@@ -37,7 +38,7 @@ from playwright.sync_api import Error as PlaywrightError, sync_playwright
 BASE = "https://ilex-private.ilex.by"
 LOGIN_URL = BASE + "/public/service-login"
 CRED_TARGET = "ilex"
-MIN_RELOGIN_MINUTES = 60
+MIN_RELOGIN_MINUTES = 0  # 0 — входить заново каждый раз, когда выбили
 LOCK_WAIT_S = 90  # меньше тайм-аута команды в сессии (120 с по умолчанию)
 
 HOME = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ilex-client")
