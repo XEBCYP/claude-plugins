@@ -7,7 +7,7 @@ import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pa
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
 import { slovaPrompt } from './slova'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
-import { registerUroven, startUroven, urovenCall, urovenCommand } from './uroven'
+import { registerUroven, startUroven, toAuto, urovenCall, urovenCommand } from './uroven'
 
 // Панель «Ждут ответа» (плагин sreda): вопросы пользователю из ~/.claude/zhdut-otveta.json, с кнопками. Вопрос
 // окна AskUserQuestion попадает в панель сам; ответ в окне сразу уносит его в архив, кнопка панели сразу отвечает
@@ -21,6 +21,8 @@ const POLL_MS = 1500
 const items = atom({ plugin: 'sreda', key: 'items' } as const, [] as Pending[])
 // Отмеченные флажки вопросов с несколькими ответами: их нажатие должно перерисовать панель — поэтому atom
 const picks = atom({ plugin: 'sreda', key: 'picked' } as const, {} as Record<string, string[]>)
+// Полоса ручного режима уровня: тот же atom, что пишет uroven.ts (уровень из программы; null — режим авто)
+const manualBand = atom({ plugin: 'sreda', key: 'urovenRuchnoj' } as const, null as string | null)
 
 // Ответ: один вариант (или свой текст) — строка; несколько отмеченных — список (окно в приложении отдаёт и так)
 type Answer = string | string[]
@@ -628,6 +630,21 @@ export const register: Register = on => {
           </Box>
         ))}
         {await next(e)}
+      </Box>
+    )
+  })
+
+  // Ручной режим уровня: полоса над полем ввода с кнопкой «Авто»; в режиме авто полосы нет
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const own = await read($, manualBand)
+    if (own === null || e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" gap={1} alignItems="center">
+        <Text>{`Уровень усилий вручную: ${own}.`}</Text>
+        <Button key="avto" variant="secondary" onPress={() => void toAuto($).then(text => $.ui.toast(text))}>
+          Авто
+        </Button>
       </Box>
     )
   })
