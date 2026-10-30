@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Уровень усилий (hooks/uroven.ts). Хуки теста стоят за движок: запоминают, с каким уровнем ушёл запрос к модели и с
 // какими параметрами — вызов агента или подпроекта.
-type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number; files: Record<string, string> }
+type Env = { efforts: string[]; models: string[]; calls: any[]; status: string[]; tokens: number; files: Record<string, string>; config?: string }
 
 function engine(on: any, env: Env) {
   mock.clock(on, { now: 1_000_000 })
@@ -16,6 +16,8 @@ function engine(on: any, env: Env) {
     return { value: undefined }
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  // Уровень по умолчанию в настройках программы
+  on('config.list', () => ({ value: env.config ? [{ key: 'effortLevel', value: env.config }] : [] }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: 'C:\\Projects\\Demo' }))
   on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: { tokens: env.tokens, window: 1_000_000 } } }))
@@ -26,6 +28,15 @@ function engine(on: any, env: Env) {
   on('fs.write', (_: unknown, e: any) => {
     env.files[key(e.path)] = String(e.text)
     return { value: undefined }
+  })
+  on('ui.toast', (_: unknown, e: { text: string }) => {
+    env.status.push(`toast: ${e.text}`)
+    return { value: undefined }
+  })
+  // Своё у движка над полем ввода — пусто: полоса «Авто» рисуется, только когда мод не отдаёт дальше
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>поле ввода</Text>
   })
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('turn.step', async function* (_: unknown, e: any) {
@@ -321,4 +332,83 @@ test('/uroven: файл проекта не JSON — не перезаписыв
   await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
   await step($, 'xhigh')
   expect(env.efforts.at(-1)).toBe('xhigh')
+})
+
+// Полоса над полем ввода в ручном режиме — кнопка «Авто» (пользователь 30.10: «добавить кнопочку авто… если я выбрал
+// вручную, авто выключилось и стоит в ручном режиме… до тех пор, пока я не включу авторежим»)
+const BAND = {
+  plugin: 'sreda',
+  component: 'AbovePrompt',
+  surface: 'desktop',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80 },
+} as const
+
+test('режим авто — полосы с кнопкой «Авто» нет', async ($, on) => {
+  await start($, on)
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'medium')
+  const ui = await $.ui.mount(BAND as any)
+  expect(await ui.find({ type: 'Text', text: /вручную/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('уровень выбран в программе — ручной режим держится, пока не нажата «Авто»; после — оценка снова работает', async ($, on) => {
+  const env = await start($, on)
+  await turn($, 'Покажи статус ветки.')
+  await step($, 'medium')
+  await step($, 'high')
+  await turn($, 'Покажи список файлов.')
+  await step($, 'high')
+  expect(env.efforts.slice(-2)).toEqual(['high', 'high'])
+
+  const ui = await $.ui.mount(BAND as any)
+  expect(await ui.find({ type: 'Text', text: /вручную: высокий/ })).toBeDefined()
+  await ui.press({ key: 'avto' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(await ui.find({ type: 'Text', text: /вручную/ })).toBeUndefined()
+  await ui.unmount()
+
+  // Уровень в программе тот же (high), запрос с ним — не новый ручной выбор: «Среда» ставит свой
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'high')
+  await step($, 'high')
+  expect(env.efforts.slice(-2)).toEqual(['medium', 'medium'])
+  expect(env.status.some(one => one.startsWith('toast: ') && one.includes('сама'))).toBe(true)
+  // Файла проекта ручной режим сессии не касается
+  expect(PROJECT in env.files).toBe(false)
+})
+
+test('ручной режим проекта: «Авто» пишет в файл проекта «авто», прочие ключи целы', async ($, on) => {
+  const env = await start($, on, 0, { [PROJECT]: '{"other": 1, "uroven": "ручной"}' })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'xhigh')
+  const ui = await $.ui.mount(BAND as any)
+  expect(await ui.find({ type: 'Text', text: /вручную: сверхвысокий/ })).toBeDefined()
+  await ui.press({ key: 'avto' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await ui.unmount()
+  expect(JSON.parse(env.files[PROJECT])).toEqual({ other: 1, uroven: 'авто' })
+  await turn($, 'Почему падает тест?')
+  await step($, 'xhigh')
+  expect(env.efforts.at(-1)).toBe('high')
+})
+
+test('«Авто» держится и после перезагрузки плагина, когда в настройках программы другой уровень', async ($, on) => {
+  const env = await start($, on)
+  env.config = 'medium'
+  await turn($, 'Покажи статус ветки.')
+  await step($, 'medium')
+  await step($, 'high')
+  const ui = await $.ui.mount(BAND as any)
+  await ui.press({ key: 'avto' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await ui.unmount()
+
+  await $.session.start({ cwd: 'C:\Projects\Demo', surface: 'desktop', isInteractive: true })
+  await turn($, 'Покажи список последних коммитов в ветке main.')
+  await step($, 'high')
+  expect(env.efforts.at(-1)).toBe('medium')
+  const again = await $.ui.mount(BAND as any)
+  expect(await again.find({ type: 'Text', text: /вручную/ })).toBeUndefined()
+  await again.unmount()
 })

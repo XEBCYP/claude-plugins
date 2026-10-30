@@ -30,10 +30,12 @@ declare module 'claude-code' {
   interface PluginState {
     // picked — отмеченные в панели флажки: id вопроса → варианты
     // uroven — ручной режим этой сессии и уровень, выбранный в программе (hooks/uroven.ts): переживают перезагрузку
+    // urovenRuchnoj — полоса ручного режима с кнопкой «Авто»: уровень из программы; null — режим авто, полосы нет
     sreda: {
       items: Pending[]
       picked: Record<string, string[]>
       uroven: { isSession: boolean; picked: string | number | null }
+      urovenRuchnoj: string | null
     }
   }
 }

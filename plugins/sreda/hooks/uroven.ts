@@ -10,6 +10,10 @@
 // Ручной режим (ADR 0012): уровень основной сессии ставит пользователь, мод его не трогает и не держит в рамках.
 // Включается файлом проекта .claude/sreda.json `{"uroven": "ручной"}` (пишет команда /uroven ручной | авто) или сам —
 // когда пользователь сменил уровень в программе посреди сессии (e.effort запроса — настройка сессии, не наша подмена).
+// В ручном режиме над полем ввода полоса «Уровень вручную: …» с кнопкой «Авто» (1.23.0, пользователь 30.10: «удобнее,
+// конечно, если внизу сессии какая-нибудь кнопочка будет»): нажатие возвращает выбор уровня «Среде», как /uroven авто.
+
+import { atom, update } from 'claude-code'
 
 import { showEffort } from './stroka'
 import { ownText } from './tekst'
@@ -36,6 +40,10 @@ let manual: 'project' | 'session' | undefined
 let picked: unknown
 // Модель прошлого запроса: при смене модели (запасная, /model) уровень по умолчанию другой — это не выбор уровня
 let lastModel: unknown
+
+// Полоса ручного режима (рисует register.tsx, у него atom с тем же ключом): уровень, выбранный в программе; null —
+// режим авто, полосы нет. atom, а не переменная модуля: полоса перерисовывается, когда он меняется
+const manualBand = atom({ plugin: 'sreda', key: 'urovenRuchnoj' } as const, null as string | null)
 
 // Диапазон — от «среднего» до «сверхвысокого»: low и max пользователь не берёт
 export function clamp(effort: unknown): Level | undefined {
@@ -96,6 +104,7 @@ function show($: any): void {
   if (text === shown) return
   shown = text
   void showEffort($, text)
+  void update($, manualBand, () => (manual ? own ?? 'как в программе' : null)).catch(() => undefined)
 }
 
 function set($: any, next: Level): string {
@@ -204,6 +213,23 @@ export async function urovenCommand($: any, args: string): Promise<string> {
   return toManual
     ? `Ручной режим в этом проекте (${where}): уровень ставите вы в программе, «Среда» его не меняет.`
     : `«Среда» снова выбирает уровень сама в этом проекте (${where}).`
+}
+
+// Кнопка «Авто» на полосе ручного режима: ручной режим проекта — как /uroven авто (файл проекта), ручной режим
+// сессии — забыть его. Уровень программы (picked) помним: следующий запрос с ним же — не новый выбор пользователя, а
+// забытый после перезагрузки плагина подменился бы уровнем из настроек, и первый запрос снова включил бы ручной режим
+export async function toAuto($: any): Promise<string> {
+  let text = '«Среда» снова выбирает уровень сама.'
+  if (manual === 'project') {
+    text = await urovenCommand($, 'авто')
+    if (manual) return text
+  }
+  manual = undefined
+  lowerAsked = undefined
+  shown = ''
+  show($)
+  await remember($)
+  return text
 }
 
 // Из session.start плагина: инструмент `uroven` и уровень по умолчанию (новая сессия и перезагрузка плагина)

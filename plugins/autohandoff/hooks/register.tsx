@@ -38,6 +38,9 @@ import type { Band } from '../types'
 // она начинается без порогов и проверки момента (полоса с отсчётом; в подпроекте — сразу). Сессия Export1c7 на ~215 тыс.
 // написала «сверку сделает новая сессия» и встала: проверка момента на 209 тыс. ответила «нет» (шла загрузка),
 // следующая — только с 229 тыс., и до сообщения пользователя ничего не происходило.
+// 30.10 (2.7.0): ниже `to` лимит `perHour` считает только передачи по кругу (чистая сессия уже в начале была выше
+// `from`) и неудачные. Нормальные передачи лимит выбирали: сессия Export1c7 передала в 14:14 и 14:55, а в 15:11
+// на 208 тыс. полосы не было.
 // /autohandoff now | off | on | status.
 
 type Dollar = Parameters<Hook<'session.start'>>[0]
@@ -80,8 +83,16 @@ type Mark = {
   // «Отменить» на полосе: до скольких тысяч токенов полосы больше нет
   quietBelow: number
   lastTurn: LastTurn | null
-  // Попытки передачи этой сессии (удачные и нет); после /clear переходят в чистую — против передач по кругу
+  // Попытки передачи этой сессии (удачные и нет); после /clear переходят в чистую — для /autohandoff status
   times: number[]
+  // Попытки по кругу: из чистой сессии, контекст которой в конце хода ни разу не был ниже `from`. Ниже `to` лимит в
+  // час считает их и неудачные; нормальные передачи (сессия поработала с малым контекстом и выросла) — нет
+  loops?: number[]
+  // Чистая сессия после /clear: наименьший контекст в конце хода и после действий, тыс. токенов; null — замеров ещё
+  // не было (тогда попытка не по кругу). Нет поля — сессия началась не с передачи, её попытки не по кругу
+  lowK?: number | null
+  // Первое действие чистой сессии ещё впереди: его замер — запрос до чтения документа передачи, его не берём
+  lowSkip?: boolean
   // Неудачные попытки (документ не записан, команда не запустилась): с `to` и у жёсткого предела лимит в час
   // считает только их — удачные передачи 28.10 выбирали лимит, и сессия Export1c7 ушла за 300 тыс. без передачи
   fails?: number[]
@@ -227,8 +238,27 @@ async function recentTimes($: Dollar): Promise<number[]> {
   return (mark.times ?? []).filter(t => now - t < HOUR)
 }
 
-async function noteTime($: Dollar): Promise<void> {
-  mark = { ...mark, times: [...(await recentTimes($)), await $.clock.now()] }
+async function noteTime($: Dollar, now: number): Promise<void> {
+  const isLoop = typeof mark.lowK === 'number' && mark.lowK >= from
+  mark = { ...mark, times: [...(await recentTimes($)), now], ...(isLoop ? { loops: [...(await recentLoops($)), now] } : {}) }
+  await save($)
+}
+
+async function recentLoops($: Dollar): Promise<number[]> {
+  const now = await $.clock.now()
+  return (mark.loops ?? []).filter(t => now - t < HOUR)
+}
+
+// Замер для признака круга: в конце хода и после действий основного цикла, кроме первого действия чистой сессии.
+// Только конец хода не годился: без сообщения пользователя первый ход чистой сессии — вся работа, и к его концу
+// контекст уже выше `from`, хотя начинался с 45 тыс.
+async function noteLow($: Dollar, isStep: boolean): Promise<void> {
+  if (mark.lowK === undefined) return
+  if (isStep && mark.lowSkip) {
+    mark = { ...mark, lowSkip: false }
+  } else {
+    mark = { ...mark, lowSkip: false, lowK: Math.min(mark.lowK ?? Infinity, await contextK($)) }
+  }
   await save($)
 }
 
@@ -237,10 +267,10 @@ async function recentFails($: Dollar): Promise<number[]> {
   return (mark.fails ?? []).filter(t => now - t < HOUR)
 }
 
-// Лимит в час: ниже `to` — все попытки (против передач по кругу: чистая сессия, начавшаяся высоко, снова «готова»);
+// Лимит в час: ниже `to` — попытки по кругу (чистая сессия, начавшаяся высоко, снова «готова») и неудачные;
 // с `to` и у жёсткого предела — только неудачные: чистая сессия так высоко не начинается, а цикл неудач лимит держит
 async function isOverLimit($: Dollar, ctx: number): Promise<boolean> {
-  const list = ctx >= to ? await recentFails($) : await recentTimes($)
+  const list = ctx >= to ? await recentFails($) : [...(await recentLoops($)), ...(await recentFails($))]
   return list.length >= perHour
 }
 
@@ -344,9 +374,10 @@ async function handoffPath($: Dollar): Promise<string> {
 async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false): Promise<void> {
   if (mark.pending) return
   const path = await handoffPath($)
-  mark = { ...mark, isArmed: false, pending: { path, startedAt: await $.clock.now(), writeTurnId: null, held, ctx, isCut } }
+  const startedAt = await $.clock.now()
+  mark = { ...mark, isArmed: false, pending: { path, startedAt, writeTurnId: null, held, ctx, isCut } }
   await save($)
-  await noteTime($)
+  await noteTime($, startedAt)
   // Если ход записи так и не начался, отмена по времени не должна ждать следующего хода
   void $.clock.after(WAIT_MS + 1000, () => void checkPending($, null))
   const users = held.filter(one => one.isUser).map(one => one.text)
@@ -371,7 +402,9 @@ async function startHandoff($: Dollar, held: Held[], ctx: number, isCut = false)
 async function cancelHandoff($: Dollar, why: string): Promise<void> {
   const p = mark.pending
   if (!p) return
-  mark = { ...mark, pending: null, isArmed: true, fails: [...(await recentFails($)), await $.clock.now()] }
+  // Неудачная попытка — в неудачных; из попыток по кругу её убираем, иначе одна неудача считалась бы дважды
+  const loops = (mark.loops ?? []).filter(t => t !== p.startedAt)
+  mark = { ...mark, pending: null, isArmed: true, loops, fails: [...(await recentFails($)), await $.clock.now()] }
   await save($)
   $.ui.toast(`${why} (${p.path}) — передача отменена`)
   await resubmit($, p.held)
@@ -393,7 +426,7 @@ async function continueFresh($: Dollar, p: Pending): Promise<void> {
     await $.command.run({ command: 'clear' })
     // После /clear у диалога может смениться id: отметка — с нуля; включится снова, когда контекст спадёт
     cliId = await $.session.id()
-    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times, fails: mark.fails }
+    mark = { ...freshMark(), isOff, isArmed: false, armBelow: Math.max(from, p.ctx - REARM_DROP), times: mark.times, fails: mark.fails, loops: mark.loops, lowK: null, lowSkip: true }
     await save($)
     const held = p.held.map(asHeld)
     if (held.some(one => one.isUser)) {
@@ -601,7 +634,7 @@ async function commandText($: Dollar, raw: string): Promise<string> {
   const kind = (isGlobal ? ' Сессия глобального проекта — свои пороги.' : '') +
     (isSub ? ' Сессия подпроекта — передача без отсчёта.' : '') +
     ` Жёсткий предел — ${hard} тыс.: ход заканчивается сам.`
-  return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times} из ${perHour} (неудачных: ${(await recentFails($)).length}).${origin}${turn}`
+  return `Контекст ${ctx} тыс. токенов.${kind} Автопередача ${state}. Попыток за час: ${times}; в лимите ${perHour} — по кругу ${(await recentLoops($)).length}, неудачных ${(await recentFails($)).length}.${origin}${turn}`
 }
 
 // Удачный момент — начать передачу с этим сообщением и пришедшими во время проверки; иначе — null
@@ -667,6 +700,8 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
 
 async function noteTurnEnd($: Dollar, isAborted: boolean, turnId: string): Promise<void> {
   isTurnRunning = false
+  // Начало хода для признака круга не годится: первый ход начинается до чтения документа передачи
+  await noteLow($, false)
   mark = { ...mark, lastTurn: { isAborted, wrap: turnWrap } }
   await save($)
   await checkPending($, turnId)
@@ -815,6 +850,7 @@ export const register: Register = (on, options) => {
     if (e.tool === askTool) return { result: await askHandoff($, e) } as never
     const r = await next(e)
     if (e.agentId || e.tool === WRAP_UP) return r
+    await noteLow($, true)
     await rearmIfLow($)
     const cut = await cutTurn($)
     if (cut) return { ...r, context: [...(r.context ?? []), cut] }
