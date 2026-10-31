@@ -3,7 +3,17 @@ import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
-import { CUT_NOTE, ostCutDue, ostCutSent, ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
+import {
+  CUT_NOTE,
+  ostCutDue,
+  ostCutSent,
+  ostKids,
+  ostStop,
+  ostTitle,
+  ostTool,
+  ostTurnComplete,
+  startOstanovki,
+} from './ostanovki'
 import type { Notice } from './ostanovki'
 import { isPaused, pausedAnywhere, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
@@ -584,6 +594,8 @@ export const register: Register = on => {
   // Сообщения в сессию: слова пользователя о паузе (hooks/pauza.ts), пометка «слова главнее плана» (hooks/slova.ts)
   // и пробуждения от подпроектов (hooks/probuzhdeniya.ts)
   on('prompt.submit', async ($, e: any, next) => {
+    // Уведомление о запущенной этой сессией сессии — её номер в подсессии (hooks/ostanovki.ts); до отсечения пробуждения
+    await ostKids($, String(e.text ?? '')).catch(() => undefined)
     const drop = await wakeCheck($, e).catch(() => null)
     if (drop) return { drop }
     const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
@@ -624,6 +636,13 @@ export const register: Register = on => {
         'Файл панели «Ждут ответа» пишет сам плагин sreda: задайте вопрос окном AskUserQuestion — в панель он попадёт ' +
         `сам, без дубля. Пользователь ответил текстом, не нажав кнопку, — инструмент ${answeredTool}.`,
     }
+  })
+
+  // Запущенная сессия — в подсессии этой: пока она работает, карточки «сессия остановилась» нет (hooks/ostanovki.ts)
+  on('tool.call', { tool: 'mcp__ccd_session__start_session' }, async ($, e: any, next) => {
+    const r = await next(e)
+    if (e.agentId === undefined) await ostKids($, JSON.stringify(r ?? ''), true).catch(() => undefined)
+    return r
   })
 
   // Окно вопроса Claude: ждём, кто ответит первым — окно или кнопка панели. Вопросы других плагинов не трогаем.

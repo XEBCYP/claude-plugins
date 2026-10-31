@@ -16,6 +16,12 @@
 // (session.start снова, ход или ожидание фоновой задачи идут) — не обрыв: процесс помечен в $.state, который живёт, пока
 // жив процесс. Обрыв помнится в отметке (поле cut), пока не начнётся ход: сообщение не дошло или пришло на паузе — не
 // пропадёт.
+//
+// Подсессии (31.10.2026, требования — docs/requirements/2026-10-31-ostanovki-sessij.md, R11). Пользователь: «чтобы
+// сессия, которая ожидает ответа своей подсессии, не присылала сообщение о том, что она стала на паузу, так как
+// подсессия еще работает». Сессия помнит запущенные ею сессии — номер приложения (local_…) из ответа start_session и
+// из уведомления «The session … you started (local_…)» — и не даёт карточку, пока свежая отметка такой сессии «ход
+// идёт» (в том числе ждёт свою фоновую задачу). Номер своей сессии в приложении каждая пишет в отметку (host).
 
 // Задержка — окно 31.10: «3 минуты (рекомендую)»; по 934 ответам пользователя 56 % приходят раньше — карточки нет
 export const DELAY_MS = 3 * 60_000
@@ -28,6 +34,13 @@ const REGISTRY = 'docs/Подпроекты.md'
 const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
 const WRAP_UP = 'mcp__ccd_turn__wrap_up'
 const BRIEF = 300
+// Сколько последних подсессий помнить; хранятся по номеру сессии в приложении — он не меняется при /clear
+const KIDS_MAX = 20
+const K_KIDS = 'sreda:podsessii:'
+// В ответе start_session — «session_id: local_…»; в сообщении — только уведомление приложения: чужая пересылка
+// ответа start_session не делает ту сессию подсессией этой
+const STARTED_ID = /session_id: (local_[\w-]+)/g
+const NOTE_ID = / you started \((local_[\w-]+)\)/g
 
 export type Notice = { id: string; from: string; question: string; why: string }
 type Hooks = {
@@ -55,6 +68,13 @@ let failed = false
 let answer = ''
 let recap = ''
 let title = ''
+// Номер этой сессии в приложении (local_…) и запущенные ею сессии
+let host = ''
+let kids: string[] = []
+// Стоит, а подсессия работает: для своего родителя или глобальной эта сессия тоже «работает»; waited — в эту
+// остановку ждала подсессию (текст карточки)
+let waitsKids = false
+let waited = false
 // Сессия сама проснётся (фоновая задача, таймер /loop, ScheduleWakeup) — она не стоит
 let wakesItself = false
 let posted = false
@@ -73,7 +93,14 @@ async function mark($: any): Promise<void> {
   if (!me) return
   const at = await $.clock.now()
   // Ждёт свою фоновую работу — для глобальной тоже «работает»: проснётся сама
-  const it = { cwd: shown, title, busy: busy || wakesItself, at, ...(cutAt !== null ? { cut: cutAt } : {}) }
+  const it = {
+    cwd: shown,
+    title,
+    busy: busy || wakesItself || waitsKids,
+    at,
+    ...(host ? { host } : {}),
+    ...(cutAt !== null ? { cut: cutAt } : {}),
+  }
   await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify(it))
 }
 
@@ -93,6 +120,15 @@ export async function startOstanovki($: any, h: Hooks): Promise<void> {
   stoppedAt = null
   posted = false
   wakesItself = false
+  waitsKids = false
+  waited = false
+  host = ''
+  kids = []
+  try {
+    host = String((await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')) ?? '')
+    const got = host ? await $.store.get(K_KIDS + host) : undefined
+    if (Array.isArray(got)) kids = got.filter((one: unknown): one is string => typeof one === 'string')
+  } catch {}
   // Тот же процесс (перезагрузка плагина) — отметка «ход идёт» его собственная, не обрыв
   let proc: { id?: string; sent?: boolean } | undefined
   try {
@@ -134,6 +170,15 @@ export function ostTitle(e: any): void {
   if (t) title = t
 }
 
+// Запущенные этой сессией сессии — из ответа start_session (isStart) и уведомлений приложения о них
+export async function ostKids($: any, text: string, isStart = false): Promise<void> {
+  const found = [...text.matchAll(isStart ? STARTED_ID : NOTE_ID)].map(m => m[1]).filter(id => id !== host)
+  const fresh = found.filter(id => !kids.includes(id))
+  if (fresh.length === 0) return
+  kids = [...kids, ...new Set(fresh)].slice(-KIDS_MAX)
+  if (host) await Promise.resolve($.store.set(K_KIDS + host, kids)).catch(() => undefined)
+}
+
 // Итог хода — из wrap_up (recap: что сделано и где стоит)
 export function ostTool(tool: string, e: any): void {
   if (tool === WRAP_UP && typeof e?.recap === 'string') recap = e.recap.trim()
@@ -152,6 +197,8 @@ export async function ostTurnStart($: any): Promise<void> {
   stoppedAt = null
   recap = ''
   wakesItself = false
+  waitsKids = false
+  waited = false
   await mark($).catch(() => undefined)
   // Всегда, а не по флагу posted: после перезапуска программы флаг пуст, а карточка в файле осталась
   posted = false
@@ -171,28 +218,41 @@ export async function ostTurnComplete($: any, e: any): Promise<void> {
 // Работает ли хоть один подпроект глобальной: свежая отметка с идущим ходом в папке из реестра
 async function subprojectsBusy($: any, now: number): Promise<boolean> {
   if (subPaths.length === 0) return false
+  return (await others($, now)).some(it => {
+    if (!it.busy || typeof it.at !== 'number' || now - it.at > STALE_MS) return false
+    const where = norm(String(it.cwd ?? ''))
+    return subPaths.some(p => where === p || where.startsWith(`${p}/`))
+  })
+}
+
+type Seen = { cwd?: string; title?: string; busy?: boolean; at?: number; host?: string }
+
+// Свежие отметки других сессий (идущий ход отмечается раз в минуту): старые — заведомо не работают
+async function others($: any, now: number): Promise<Seen[]> {
   const dir = `${await home($)}/${DIR}`
   let entries: { name: string; mtimeMs?: number }[] = []
   try {
     entries = await $.fs.list(dir)
   } catch {
-    return false
+    return []
   }
+  const out: Seen[] = []
   for (const one of entries) {
     if (!one.name.endsWith('.json') || one.name === `${me}.json`) continue
-    // Старые отметки не читаем: такая сессия заведомо не работает
     if (typeof one.mtimeMs === 'number' && one.mtimeMs > 0 && now - one.mtimeMs > STALE_MS) continue
-    let it: { cwd?: string; busy?: boolean; at?: number }
     try {
-      it = JSON.parse(String(await $.fs.read(`${dir}/${one.name}`)))
-    } catch {
-      continue
-    }
-    if (!it.busy || typeof it.at !== 'number' || now - it.at > STALE_MS) continue
-    const where = norm(String(it.cwd ?? ''))
-    if (subPaths.some(p => where === p || where.startsWith(`${p}/`))) return true
+      out.push(JSON.parse(String(await $.fs.read(`${dir}/${one.name}`))))
+    } catch {}
   }
-  return false
+  return out
+}
+
+// Работает ли подсессия этой сессии: свежая отметка «ход идёт» с её номером в приложении
+async function kidsBusy($: any, now: number): Promise<boolean> {
+  if (kids.length === 0) return false
+  return (await others($, now)).some(
+    it => it.busy === true && typeof it.at === 'number' && now - it.at <= STALE_MS && kids.includes(String(it.host ?? '')),
+  )
 }
 
 const brief = (text: string) => (text.length > BRIEF ? `${text.slice(0, BRIEF - 1)}…` : text)
@@ -239,13 +299,20 @@ async function cutOthers($: any, now: number): Promise<void> {
 async function tick($: any): Promise<void> {
   await cutOthers($, await $.clock.now()).catch(() => undefined)
   if (busy || wakesItself) return void (await mark($))
-  if (stoppedAt === null || posted || !hooks) return
   const now = await $.clock.now()
+  // Подсессия работает — отметка «работает» и у этой (цепочка подсессий, подпроект глобальной); перестала — снять
+  const was = waitsKids
+  waitsKids = await kidsBusy($, now).catch(() => false)
+  if (waitsKids) waited = true
+  if (waitsKids || was) await mark($).catch(() => undefined)
+  if (stoppedAt === null || posted || !hooks) return
   if (now - stoppedAt < DELAY_MS) return
   if (await hooks.hasOpen()) return
   const isGlobal = subPaths.length > 0
   // Ошибка глобальной — сразу: подпроекты без неё не продвинутся
   if (isGlobal && !failed && (await subprojectsBusy($, now))) return
+  // Ждёт свою подсессию — не стоит (R11); ошибка — сразу, как у глобальной
+  if (waitsKids && !failed) return
   const at = new Date(stoppedAt)
   const name = isGlobal
     ? title ? `Глобальная сессия «${title}»` : 'Глобальная сессия'
@@ -254,7 +321,9 @@ async function tick($: any): Promise<void> {
     ? `${name} остановилась с ошибкой`
     : isGlobal
       ? `${name} и все подпроекты остановились`
-      : `${name} завершила работу и ждёт`
+      : waited
+        ? `${name} и её подсессии остановились`
+        : `${name} завершила работу и ждёт`
   const said = recap || answer
   const why = `Остановилась в ${two(at.getHours())}:${two(at.getMinutes())}.${said ? ` Итог: ${brief(said)}` : ''}`
   posted = true
