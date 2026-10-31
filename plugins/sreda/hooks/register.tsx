@@ -3,9 +3,9 @@ import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
-import { ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
+import { CUT_NOTE, ostCutDue, ostCutSent, ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
 import type { Notice } from './ostanovki'
-import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
+import { isPaused, pausedAnywhere, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
 import { slovaPrompt } from './slova'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
@@ -447,6 +447,26 @@ async function postNotice($: any, n: Notice): Promise<void> {
   await reveal($, list)
 }
 
+// Карточка о чужой оборванной сессии (hooks/ostanovki.ts): одна на обрыв — нет ни в панели, ни в архиве («Ок» нажали)
+async function postCut($: any, n: Notice & { session: string }): Promise<void> {
+  const list = await load($)
+  if (list.some(one => one.id === n.id) || (await load($, ARCHIVE)).some(one => one.id === n.id)) return
+  list.push({
+    id: n.id,
+    from: n.from,
+    question: n.question,
+    why: n.why,
+    options: [{ label: 'Ок' }],
+    kind: 'ostanovka',
+    status: 'open',
+    asked: new Date().toISOString().slice(0, 10),
+    session: n.session,
+  })
+  await save($, list)
+  await update($, items, () => list)
+  await reveal($, list)
+}
+
 // Сессия снова работает — её карточка в архив сама, без кнопки
 async function unpostNotice($: any): Promise<void> {
   const mine = await self($)
@@ -515,7 +535,14 @@ export const register: Register = on => {
       post: n => postNotice($, n),
       unpost: () => unpostNotice($),
       hasOpen: () => hasOpenQuestion($),
+      postCut: n => postCut($, n),
     }).catch(() => undefined)
+    // Прошлый процесс выгружен посреди хода — доделать начатое; на паузе — с первым сообщением после «продолжай»
+    // (hooks/ostanovki.ts)
+    if (ostCutDue() && !(await pausedAnywhere($))) {
+      await ostCutSent($)
+      void $.prompt.submit({ text: CUT_NOTE }).catch(() => undefined)
+    }
     seen = undefined
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
@@ -558,6 +585,11 @@ export const register: Register = on => {
     const drop = await wakeCheck($, e).catch(() => null)
     if (drop) return { drop }
     const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
+    // Обрыв, отложенный паузой: пауза снята («продолжай» или /prodolzhit) — доделать начатое (hooks/ostanovki.ts)
+    if (ostCutDue() && !e.command && !e.isMeta && !(await pausedAnywhere($))) {
+      await ostCutSent($)
+      notes.push(CUT_NOTE)
+    }
     return next(notes.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...notes] })
   })
 

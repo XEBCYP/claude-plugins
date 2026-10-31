@@ -43,10 +43,31 @@ export function isPaused(): boolean {
   return paused
 }
 
+// Пауза для других сессий (подпроектов) — файлом: его каждая сессия читает заново, а $.store процесс мог прочитать раньше
+const FLAG = 'sreda-pauza.json'
+
+async function flagPath($: any): Promise<string> {
+  const dir = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '.'
+  return `${String(dir).split('\\').join('/')}/.claude/${FLAG}`
+}
+
+// Пауза любой глобальной: подпроект на паузе глобальной тоже ждёт «продолжай»
+export async function pausedAnywhere($: any): Promise<boolean> {
+  if (paused) return true
+  try {
+    return typeof JSON.parse(String(await $.fs.read(await flagPath($))))?.at === 'number'
+  } catch {
+    return false
+  }
+}
+
 async function setPaused($: any, on: boolean): Promise<void> {
   paused = on
-  if (on) await $.store.set(key, { at: await $.clock.now() })
+  const at = await $.clock.now()
+  if (on) await $.store.set(key, { at })
   else await $.store.delete(key)
+  const flag = await flagPath($).catch(() => '')
+  if (flag) await $.fs.write(flag, JSON.stringify(on ? { at, cwd: key.slice(K_PAUSE.length) } : {})).catch(() => undefined)
 }
 
 const PAUSE_NOTE =
