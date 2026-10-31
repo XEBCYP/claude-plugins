@@ -20,6 +20,8 @@ const NAME = 'zhdut-otveta.json'
 const ARCHIVE = 'zhdut-otveta-arhiv.json'
 // Опрос файла: так быстро кнопка другой сессии доходит до окна этой
 const POLL_MS = 1500
+// Сообщения других сессий и фоновых задач (как в autohandoff): приложение шлёт их с isMeta
+const SESSION_ORIGINS = new Set(['peer', 'peer-send-message', 'projects-relay', 'coordinator', 'task-notification'])
 const items = atom({ plugin: 'sreda', key: 'items' } as const, [] as Pending[])
 // Отмеченные флажки вопросов с несколькими ответами: их нажатие должно перерисовать панель — поэтому atom
 const picks = atom({ plugin: 'sreda', key: 'picked' } as const, {} as Record<string, string[]>)
@@ -586,7 +588,9 @@ export const register: Register = on => {
     if (drop) return { drop }
     const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
     // Обрыв, отложенный паузой: пауза снята («продолжай» или /prodolzhit) — доделать начатое (hooks/ostanovki.ts)
-    if (ostCutDue() && !e.command && !e.isMeta && !(await pausedAnywhere($))) {
+    // Сообщение другой сессии («продолжай» глобальной) приложение шлёт с isMeta — оно не служебное
+    const isOwnMeta = e.isMeta && !SESSION_ORIGINS.has(e.origin?.kind)
+    if (ostCutDue() && !e.command && !isOwnMeta && !(await pausedAnywhere($))) {
       await ostCutSent($)
       notes.push(CUT_NOTE)
     }
