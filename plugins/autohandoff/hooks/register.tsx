@@ -688,8 +688,14 @@ async function noteTurnStart($: Dollar, turnId: string): Promise<void> {
   stepCount = 0
   stepsAt = steps
   await rearmIfLow($)
-  // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода
+  // Начался ход не по полосе (событие другой сессии, сообщение плагина) — отсчёт снимаем, решим в конце хода.
+  // Полоса по просьбе сессии (`peredat`): просьба остаётся — передача в конце этого хода (31.10 её терял такой ход)
+  const isAskedBand = !!bandNow?.isAsked
   await cancelCountdown($, true)
+  if (isAskedBand && !mark.pending) {
+    mark = { ...mark, isAsked: true }
+    await save($)
+  }
   // Команда передачи стоит в очереди: первый ход основного цикла после её начала — ход записи документа
   const p = mark.pending
   if (p && !p.writeTurnId) {
@@ -869,8 +875,10 @@ export const register: Register = (on, options) => {
     if (e.origin.kind !== 'plugin') lastOrigin = e.origin.kind
     const isUser = USER_ORIGINS.has(e.origin.kind) && !e.command && !e.isMeta
     if (!isUser) {
-      // Сообщения других сессий и события: во время передачи и с `to` — в чистую сессию следом за документом
-      const reason = e.origin.kind === 'plugin' || e.isMeta ? null : await onOtherSubmit($, e)
+      // Сообщения других сессий и события: во время передачи и с `to` — в чистую сессию следом за документом.
+      // Сообщение другой сессии приложение шлёт с isMeta (origin peer, hostInjected) — оно не служебное
+      const isOwnMeta = e.isMeta && e.origin.kind !== 'peer'
+      const reason = e.origin.kind === 'plugin' || isOwnMeta ? null : await onOtherSubmit($, e)
       return reason === null ? next(e) : { drop: reason }
     }
 
