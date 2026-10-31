@@ -415,27 +415,85 @@ def text_by_scroll(page):
 
 # --- Ссылки документа и абзацы с номерами (сегментами) ---
 
+# Номер абзаца: прежнее оформление — span.segmentId-element[segmentid], новое (с 2026) — span.not-visible-element#M<номер>.
 WALK_LINKS = """() => { const w = window.__ilexLinks = window.__ilexLinks || {links: {}, paras: {}, order: 0};
     const root = document.querySelector('[data-ilex-walk]') || document.body;
     const it = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); let seg = '', n;
     const sp = t => (t || '').replace(/\\s+/g, ' ').trim();
     const own = el => sp([...el.childNodes].filter(c => !(c.tagName || '').toLowerCase().endsWith('additional-link'))
         .map(c => c.textContent).join(''));
+    const mark = el => el.classList.contains('segmentId-element') ? el.getAttribute('segmentid') || ''
+        : el.classList.contains('not-visible-element') && /^M\\d+$/.test(el.id) ? el.id.slice(1) : '';
     while ((n = it.nextNode())) {
-        if (n.classList.contains('segmentId-element') && n.getAttribute('segmentid')) { seg = n.getAttribute('segmentid'); continue; }
+        if (mark(n)) { seg = mark(n); continue; }
         const tag = n.tagName.toLowerCase();
-        if (tag === 'p') {  // номер абзаца — пустой span внутри него
-            const own = n.querySelector('.segmentId-element[segmentid]'); if (own) seg = own.getAttribute('segmentid');
-            if (seg && !w.paras[seg]) { const t = sp(n.innerText); if (t) w.paras[seg] = [w.order++, t]; } }
-        if (tag !== 'document-link' && tag !== 'simple-link' && tag !== 'document-additional-link') continue;
+        if (tag === 'p') {  // номер абзаца — пустой span внутри него; у одного номера бывает несколько абзацев
+            const m = n.querySelector('.segmentId-element[segmentid], span.not-visible-element[id^="M"]'); if (m && mark(m)) seg = mark(m);
+            const t = sp(n.innerText);
+            if (seg && t) { if (!w.paras[seg]) w.paras[seg] = [w.order++, t];
+                else if (!w.paras[seg][1].includes(t)) w.paras[seg][1] += ' ¶ ' + t; } }
+        if (tag !== 'document-link' && tag !== 'simple-link' && tag !== 'document-additional-link' && tag !== 'additional-link') continue;
         const key = n.id || (tag + n.getAttribute('docid') + n.getAttribute('segmentid') + seg);
         if (w.links[key]) continue;
         const p = n.closest('p');
-        w.links[key] = {o: w.order++, seg, extra: tag === 'document-additional-link',
+        const extra = tag.endsWith('additional-link');
+        w.links[key] = {o: w.order++, seg, extra,
             type: n.getAttribute('link-type') || (tag === 'simple-link' ? 'справка' : ''),
             ib: n.getAttribute('infobank') || '', doc: n.getAttribute('docid') || '', to: n.getAttribute('segmentid') || '',
-            text: tag === 'document-additional-link' ? '' : own(n), para: p ? sp(p.innerText).slice(0, 90) : ''};
+            text: extra ? '' : own(n), para: p ? sp(p.innerText).slice(0, 90) : ''};
     } }"""
+
+# Поиск в документе (новое оформление): поле над текстом, счётчик «k/N», страница сама переходит к совпадению.
+DOC_SEARCH = "il-doc-search-ab-test-input input.search-input"
+DOC_NEXT = "il-doc-search-ab-test-input .next-button"
+SEARCH_COUNT = """() => { const b = document.querySelector('il-doc-search-ab-test-input');
+    const m = b && b.innerText.match(/(\\d+)\\s*\\/\\s*(\\d+)/); return m ? [+m[1], +m[2]] : null; }"""
+HIT_SEG = """() => { const e = document.querySelector('em.word-active-highlight'); if (!e) return null;
+    for (let n = e; n; n = n.parentElement) {
+        const m = String(n.className).match(/highlight-block-for-M(\\d+)/) || (n.id || '').match(/^M(\\d+)_hl/); if (m) return m[1]; }
+    let seg = null;
+    for (const s of document.querySelectorAll('span.not-visible-element[id^="M"], .segmentId-element[segmentid]')) {
+        if (!(s.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING)) break;
+        seg = s.id ? s.id.slice(1) : s.getAttribute('segmentid'); }
+    return seg; }"""
+
+
+def search_hits(page, phrase, limit_s=WALK_LIMIT_S):
+    """Пройти по всем совпадениям поиска в документе и на каждом собрать ссылки и абзацы вокруг (WALK_LINKS).
+    (номера абзацев с совпадениями, всего совпадений, пройдены ли все) или None — поиска в документе на странице нет."""
+    box = page.locator(DOC_SEARCH).first
+    if not box.count():
+        return None
+    box.fill(phrase)
+    box.press("Enter")
+    end, segs, seen, total, prev = time.monotonic() + limit_s, [], set(), 0, None
+    while True:
+        for _ in range(16):  # переход к совпадению: счётчик сменился и подсветка на месте
+            page.wait_for_timeout(500)
+            cnt = page.evaluate(SEARCH_COUNT)
+            if cnt and cnt != prev and page.evaluate(HIT_SEG):
+                break
+        if not cnt or not cnt[1]:
+            return segs, 0, True
+        k, total = cnt
+        if k in seen:  # счётчик не сдвинулся или пошёл по кругу — все пройдены
+            return segs, total, len(seen) >= total
+        seen.add(k)
+        prev = cnt
+        page.wait_for_timeout(700)  # абзацы вокруг совпадения дорисовываются
+        page.evaluate(WALK_LINKS)
+        seg = page.evaluate(HIT_SEG)
+        if seg and seg not in segs:
+            segs.append(seg)
+        if len(seen) >= total:
+            return segs, total, True
+        if time.monotonic() > end:
+            return segs, total, False
+        nxt = page.locator(DOC_NEXT).first
+        if nxt.count():
+            nxt.evaluate("e => e.click()")
+        else:
+            box.press("Enter")
 
 LINK_TYPES = ("Типы: РДД — акт, которым внесено изменение («в ред. …»); НУЛ — ссылка на норму (без базы — внутри этого "
               "документа, с базой — другой акт или прежняя редакция); ПОТ — акт утратил силу; ИЗА — изменённая норма "
@@ -443,22 +501,37 @@ LINK_TYPES = ("Типы: РДД — акт, которым внесено изм
               "справка — ссылки шапки и справки (редакции, вопросы).")
 
 
-def print_links(page, words, max_chars):
-    done = walk(page, WALK_LINKS)
+def snippet(text, words, size=110):
+    """Начало абзаца или, если в нём есть искомое слово, кусок вокруг первого вхождения."""
+    j = text.lower().find(words[0]) if words else -1
+    if j < 40:
+        return text[:size]
+    return "…" + text[max(0, j - 40):j - 40 + size]
+
+
+def print_links(page, words, max_chars, phrase=""):
+    hits, head = search_hits(page, phrase) if words else None, ""
+    if hits is None:  # без --find или в прежнем оформлении — прокрутка всего документа с начала
+        done = walk(page, WALK_LINKS)
+        found = []
+    else:
+        found, total, done = hits
+        head = f"Поиск в документе «{phrase}»: совпадений {total}, абзацев с ними {len(found)}"
     if on_login_page(page):  # вход потерян по дороге — ничего не печатать, иначе повтор выведет список дважды
         return LOST
     data = page.evaluate("() => window.__ilexLinks || {links: {}, paras: {}}")
     links = sorted(data["links"].values(), key=lambda x: x["o"])
     paras = sorted(data["paras"].items(), key=lambda x: x[1][0])
-    if words:
-        keep = {seg for seg, (_, t) in paras if all(w in t.lower() for w in words)}
+    if words:  # абзацы, где поиск ilex нашёл совпадение (с учётом окончаний), и где есть все слова
+        keep = set(found) | {seg for seg, (_, t) in paras if all(w in t.lower() for w in words)}
         paras = [x for x in paras if x[0] in keep]
         links = [x for x in links if x["seg"] in keep]
     counts = {}
     for x in links:
         counts[x["type"] or "—"] = counts.get(x["type"] or "—", 0) + 1
-    lines = [f"\n--- Абзацы: {len(paras)} (сегмент | начало) — сегмент нужен для backlinks --seg ---"]
-    lines += [f"M{seg} | {t[:110]}" for seg, (_, t) in paras]
+    lines = [head] if head else []
+    lines.append(f"\n--- Абзацы: {len(paras)} (сегмент | текст) — сегмент нужен для backlinks --seg ---")
+    lines += [f"M{seg} | {snippet(t, words)}" for seg, (_, t) in paras]
     lines.append(f"\n--- Ссылки: {len(links)} ({', '.join(f'{k} {v}' for k, v in sorted(counts.items()))}) ---")
     lines.append(LINK_TYPES)
     lines.append("абзац | тип | текст ссылки | адрес")
@@ -476,7 +549,10 @@ def print_links(page, words, max_chars):
     print(out[:max_chars])
     if len(out) > max_chars:
         print(f"\n[обрезано: показано {max_chars} из {len(out)} знаков; сузить — --find, больше — --max]")
-    if not done:
+    if not done and hits is not None:
+        print(f"\n[ВНИМАНИЕ: поиск в документе остановлен по времени — пройдены не все {hits[1]} совпадений; "
+              "уточнить --find (больше слов)]")
+    elif not done:
         print(NOT_TO_END)
     return 0
 
@@ -489,7 +565,7 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
     if links:
         if out or full:
             print("ilex: --links выводит список ссылок; --out и --full с ним не действуют")
-        return print_links(page, words, max_chars)
+        return print_links(page, words, max_chars, find or "")
     # Всегда весь текст: страница подгружает длинный документ частями и середину теряет. --full оставлен для
     # совместимости и только добавляет строку «как получен текст».
     text, how, done = text_by_word(page), "экспорт в Word", True
