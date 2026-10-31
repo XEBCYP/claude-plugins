@@ -482,7 +482,9 @@ def search_hits(page, phrase, limit_s=WALK_LIMIT_S):
                 break
         if not cnt and not seen:  # счётчика нет — не «ноль совпадений», а поиск не ответил: пусть идёт прокрутка
             return None
-        if not cnt or not cnt[1]:
+        if cnt and not cnt[1]:  # счётчик «0/0» — совпадений нет, документ пройден поиском целиком
+            return segs, 0, True
+        if not cnt:
             return segs, total, bool(seen)
         k, total = cnt
         if k in seen:  # счётчик не сдвинулся или пошёл по кругу — все пройдены
@@ -780,7 +782,11 @@ def page_through(page, label, pg, all_pages, n):
         print("дата и состояние | название | адрес")
         print_list(page, n)
         if not all_pages:
-            print("[следующие 25 — --page, все страницы сразу — --all]")
+            nxt = page.locator("button.mat-mdc-paginator-navigation-next").first
+            if nxt.count() and not nxt.is_disabled():
+                print("[следующие 25 — --page, все страницы сразу — --all]")
+            else:
+                print("[конец списка]")
             return 0
         if time.monotonic() > end:
             print(f"\n[ВНИМАНИЕ: листание остановлено по времени на странице {k}; продолжить — --page {k + 1} --all]")
