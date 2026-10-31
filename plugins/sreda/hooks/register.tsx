@@ -586,7 +586,7 @@ export const register: Register = on => {
     if (drop) return { drop }
     const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
     // Обрыв, отложенный паузой: пауза снята («продолжай» или /prodolzhit) — доделать начатое (hooks/ostanovki.ts)
-    if (ostCutDue() && !(await pausedAnywhere($))) {
+    if (ostCutDue() && !e.command && !e.isMeta && !(await pausedAnywhere($))) {
       await ostCutSent($)
       notes.push(CUT_NOTE)
     }

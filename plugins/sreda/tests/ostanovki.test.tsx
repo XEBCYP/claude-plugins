@@ -382,6 +382,8 @@ test('O02: глобальная на паузе — при запуске пос
   // Сообщение на паузе — без «доделай»; «продолжай» — с ним, один раз
   await $.prompt.submit({ text: 'Что сейчас?', wait: false, origin: { kind: 'composer' } } as never)
   expect(env.contexts.filter(s => s.startsWith(CUT))).toEqual([])
+  // Ход на паузе обрыв не снимает
+  await turn($)
   await $.prompt.submit({ text: 'Продолжай', wait: false, origin: { kind: 'composer' } } as never)
   expect(env.contexts.filter(s => s.startsWith(CUT)).length).toBe(1)
   expect(env.files[`${HOME}/sreda-pauza.json`]).toBe('{}')
@@ -400,6 +402,9 @@ test('O02: подпроект на паузе глобальной — при з
   expect(env.submits.filter(s => s.startsWith(CUT))).toEqual([])
   // Глобальная сняла паузу и прислала «продолжай»
   env.files[`${HOME}/sreda-pauza.json`] = '{}'
+  // Команда пометку не забирает
+  await $.prompt.submit({ text: '/uroven', command: 'uroven', wait: false, origin: { kind: 'composer' } } as never)
+  expect(env.contexts.filter(s => s.startsWith(CUT))).toEqual([])
   await $.prompt.submit({ text: 'Продолжай', wait: false, origin: { kind: 'sdk' } } as never)
   expect(env.contexts.filter(s => s.startsWith(CUT)).length).toBe(1)
 })

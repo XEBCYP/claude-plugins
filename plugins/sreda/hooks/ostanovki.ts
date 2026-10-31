@@ -147,7 +147,8 @@ export function ostStop(e: any): void {
 
 export async function ostTurnStart($: any): Promise<void> {
   busy = true
-  cutAt = null
+  // Ход на паузе (сообщение ещё не отправлено) обрыв не снимает: «доделай» уйдёт после «продолжай»
+  if (cutSent) cutAt = null
   stoppedAt = null
   recap = ''
   wakesItself = false
