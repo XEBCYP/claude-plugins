@@ -32,27 +32,42 @@ REASON_RE = re.compile(r"нет\s+доступа|не\s+опубликован\w
 # Где искали: без этого «недоступен» — не доказано. Нужны попытки и в ilex, и вне его.
 TRIED_ILEX = re.compile(r"ilex|search|backlinks|refs|editions|запрос|вкладк", re.I)
 TRIED_OUT = re.compile(r"сайт|интернет|pravo|http|библиотек|письм|звон|архив", re.I)
+# Попытки и цепочка на словах: «запрос не делал», «на сайт не ходил», «ничего не делалось».
+NEGLECT_RE = re.compile(r"\bне\s+(?:дел|дела|ход|иска|искал|смотр|провер|запрашива|обраща|открыва|запуска|выполня|"
+                        r"успе)\w*", re.I)
 # Нормативный акт: у прочитанного — графа «Цепочка» (refs, backlinks) обязательна.
 ACT_RE = re.compile(r"закон|кодекс|указ|декрет|постановлени|положени|инструкци|перечен|перечн|правил|приказ|"
                     r"конституци|соглашени|конвенци|договор|директив|решени\w*\s+(?:совета|исполкома|комиссии)",
                     re.I)
-SOURCE_WORDS = (r"документ|акт\b|акта|акту|актом|актов|закон|кодекс|указ|декрет|постановлени|положени|инструкци|"
+SOURCE_WORDS = (r"документ|акт\b|акта|акту|актом|актов|акты|акте|писем|закон|кодекс|указ|декрет|постановлени|положени|инструкци|"
                 r"перечн|перечен|правил|письм|разъяснени|норм|источник|ilex|материал|практик|комментари|текст|"
-                r"редакци|стать|пункт|приложени|решени|ответ|мнени|публикаци")
+                r"редакци|стать|пункт|приложени|решени|ответ|мнени|публикаци|приказ|порядок|порядк")
 SOURCE_RE = re.compile(SOURCE_WORDS, re.I)
+# «Противоречий не найдено», «изменений не обнаружено» — отрицание о содержании, не об источнике.
+NOT_SOURCE_RE = re.compile(r"(?:противореч|расхожд|ошиб|нарушени|основани|изменени|различи|замечани|отличи|"
+                           r"несоответстви|пробел|коллизи|оговор|исключени)\w*\s*$", re.I)
 # Отрицательные утверждения об источниках.
-VERBS = (r"изучен|изучал|изуча|открыт|открывал|найден|нашл|проверен|проверял|прочитан|просмотрен|смотрел|исследован|"
-         r"рассмотрен|рассматрива|получен|проанализирован|анализирова|искал|искать|учтен|учтён|использован|запрашива")
-INF = r"найти|открыть|изучить|получить|прочитать|проверить|рассмотреть|проанализировать|посмотреть|просмотреть"
+VERBS = (r"изучен|изучал|изуча|открыт|открывал|найден|нашл|проверен|проверял|прочитан|прочит|читал|читали|прочл|"
+         r"прочт|просмотрен|смотрел|исследова|рассмотрен|рассматрива|получен|проанализирован|анализирова|искал|искать|"
+         r"учтен|учтён|использован|запрашива|загрузил|загружа|скача|ознакомил|ознакомл")
+INF = (r"найти|открыть|изучить|получить|прочитать|проверить|рассмотреть|проанализировать|посмотреть|просмотреть|"
+       r"ознакомиться|загрузить|скачать|исследовать|изучать|уточнить")
+PARTLY = r"частично|выборочно|не\s+полностью|не\s+до\s+конца|поверхностно|бегло|кратко|в\s+общих\s+чертах"
 SOURCE_NOUNS = r"разъяснени|практик|писем|письм|комментари|ответ|материал|мнени|публикаци|текст|редакци|документ|акт"
 NEGATIVE = re.compile(
     r"не\s+(?:(?:был|была|было|были|стал\w*)\s+)?(?:" + VERBS + r")\w*"
     r"|\bне(?:" + VERBS + r")\w*"  # «неизученным», «непроверенные»
     r"|не\s+(?:удалось|успел\w*|получилось|смогл\w*|смог)\s+(?:\S+\s+)?(?:" + INF + r")"
-    r"|(?:" + INF + r")\s+(?:\S+\s+)?не\s+(?:удалось|успел\w*|получилось|смогл\w*|смог)"
+    r"|(?:" + INF + r")\s+(?:\S+\s+){0,4}?не\s+(?:удалось|успел\w*|получилось|смогл\w*|смог)"
     r"|требу\w*\s+(?:\S+\s+)?(?:изучени|проверк|анализ|рассмотрени)\w*"
     r"|рекоменду\w*\s+(?:\S+\s+)?(?:проверить|изучить|уточнить|рассмотреть)"
-    r"|(?:за|вне)\s+(?:рамками|рамок|пределами)\b"
+    r"|(?:следует|нужно|необходимо|надо|стоит|предстоит|остал\w*|желательно)\s+(?:\S+\s+)?(?:" + INF + r")\b"
+    r"|не\s+все\s+(?:\S+\s+){0,3}?(?:" + VERBS + r")\w*"
+    r"|(?:" + VERBS + r")\w*\s+(?:лишь\s+|только\s+)?(?:" + PARTLY + r")\b"
+    r"|(?:" + PARTLY + r")\s+(?:" + VERBS + r")\w*"
+    r"|(?:изучени|анализ|проверк|исследовани|рассмотрени|чтени|ознакомлени)\w*(?:\s+\S+){0,4}?\s+не\s+"
+    r"(?:провод|выполня|делал|проведен|выполнен)\w*"
+    r"|(?:за|вне)\s+(?:рамками|рамок|пределами)\b|вне\s+поля\s+зрения"
     r"|отложен\w*|на\s+потом|позже\s+(?:изучить|проверить)"
     r"|недоступ\w*"
     r"|отсутству\w*\s+(?:\S+\s+){0,2}?(?:" + SOURCE_NOUNS + r")\w*"
@@ -64,7 +79,11 @@ NEGATIVE = re.compile(
 EVIDENCE_RE = re.compile(r"запрос\w*[^.!?]{0,40}[«\"„]", re.I)  # «запросы «…», «…» — 0»
 ABBR = re.compile(r"(?:\b(?:п|пп|ст|ч|г|гг|подп|прил|гл|разд|см|др|абз|им|рис|табл|ред|N|№|т\.\s?к|т\.\s?е|т\.\s?п|"
                   r"т\.\s?д)\.)$", re.I)
-NUM_RE = re.compile(r"(?:N|№)\s*(\d[\w/\-–.]*\w|\d)")
+NUM_RE = re.compile(r"(?<!\w)(?:N|№)\s*(\d[\w/\-–.]*\w|\d)", re.I)
+DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+# Даты, годы и адреса ilex — не номера актов.
+NOT_NUM_RE = re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b|\b\d{1,2}\s+[а-яё]+\s+\d{4}|\b\d{4}\s*г|/view-document/\S+",
+                        re.I)
 TEMPLATE = ("# Реестр источников: <вопрос>\n\n"
             "Дорожная карта (виды источников): закон или кодекс; указ; постановление Совмина; ведомственные акты; "
             "письма и разъяснения; аналитика и ответы экспертов; формы; судебная практика.\n\n"
@@ -118,9 +137,12 @@ def check_registry(items):
         elif status == "прочитан":
             if not filled(r["Где прочитан"]):
                 issues.append(f"{where}: «прочитан», но не указано где (адрес ilex, сайт, файл)")
-            if ACT_RE.search(name) and not filled(r["Цепочка"], 10):
-                issues.append(f"{where}: нормативный акт прочитан, но «Цепочка» пуста — refs и backlinks по нужным "
-                              "абзацам: числа по вкладкам и что из них прочитано")
+            chain = r["Цепочка"]
+            if ACT_RE.search(name) and not (re.search(r"refs|ссылк", chain, re.I)
+                                            and re.search(r"backlinks|ссылают|вкладк|аналитик", chain, re.I)
+                                            and re.search(r"\d", chain) and not NEGLECT_RE.search(chain)):
+                issues.append(f"{where}: нормативный акт прочитан, но «Цепочка» не заполнена — refs и backlinks по "
+                              "нужным абзацам: числа по вкладкам и что из них прочитано (номера строк)")
         elif status == "не относится":
             if not filled(why, 15):
                 issues.append(f"{where}: «не относится» — нужно, почему (по какому месту или по названию)")
@@ -130,6 +152,9 @@ def check_registry(items):
             rest = REASON_RE.sub("", why)
             if not REASON_RE.search(why):
                 issues.append(f"{where}: «недоступен» — причина только из списка: {'; '.join(REASONS)}")
+            elif NEGLECT_RE.search(rest):
+                issues.append(f"{where}: «недоступен» — в попытках «{NEGLECT_RE.search(rest).group(0)}»: "
+                              "сначала искать, потом писать «недоступен»")
             elif not (TRIED_ILEX.search(rest) and TRIED_OUT.search(rest)):
                 issues.append(f"{where}: «недоступен» — нужны попытки и в ilex (поиск по номеру и названию, editions, "
                               "backlinks), и вне его (сайт органа, интернет)")
@@ -151,12 +176,21 @@ def named(part, name):
     return bool(words) and all(w in have for w in words[:3])
 
 
+def norm_num(n):
+    return n.lower().replace("–", "-").rstrip(".-")
+
+
+def act_nums(text):
+    """Номера актов в тексте («№ 868», «N 150-З») — целиком, без окончаний-точек."""
+    return [norm_num(n) for n in NUM_RE.findall(text)]
+
+
 def row_nums(items):
     """Номер акта → статус строки реестра."""
     out = {}
     for _, r in items:
-        for n in NUM_RE.findall(r["Документ"]):
-            out.setdefault(n.lower().rstrip(".-–"), r["Статус"].lower())
+        for n in act_nums(r["Документ"]):
+            out.setdefault(n, r["Статус"].lower())
     return out
 
 
@@ -174,8 +208,9 @@ def sentences(line):
 def check_report(text, items):
     """Отрицательные фразы об источниках без причины рядом и акты с номером, которых нет в реестре."""
     issues = []
-    known = " ".join(f"{r['Документ']} {r['Где прочитан']}" for _, r in items).lower()
-    known_nums = {n.lower() for n in NUM_RE.findall(known)} | set(re.findall(r"\d[\w/\-–]*\w|\d", known))
+    # Номера актов из графы «Документ»: с «№» и без него («Положение 868», «8/14»), но не даты, годы и адреса.
+    known = NOT_NUM_RE.sub(" ", " ".join(r["Документ"] for _, r in items))
+    known_nums = set(act_nums(known)) | {norm_num(n) for n in re.findall(r"(?<![\w.])\d[\w/\-–]*\w|(?<![\w.])\d", known)}
     nums, unavailable = row_nums(items), [r for _, r in items if r["Статус"].lower() == "недоступен"]
     for i, line in enumerate(text.splitlines(), 1):
         for near in (c for sentence in sentences(line) for c in clauses(sentence)):
@@ -185,8 +220,10 @@ def check_report(text, items):
                 if re.search(r"не\s+относится", near, re.I):
                     continue
                 reason = REASON_RE.search(near)
+                if NOT_SOURCE_RE.search(near[max(0, m.start() - 40):m.start()]):
+                    continue  # «изучено, противоречий не найдено» — отрицание не про источник
                 if reason:  # причина в этой части предложения — сверить с реестром
-                    said = [n.lower().rstrip(".-–") for n in NUM_RE.findall(near)]
+                    said = act_nums(near)
                     wrong = [n for n in said if nums.get(n) not in (None, "недоступен")]
                     if wrong:
                         issues.append(f"отчёт, строка {i}: «{reason.group(0)}» у акта № {wrong[0]}, а в реестре он "
@@ -201,7 +238,7 @@ def check_report(text, items):
                 issues.append(f"отчёт, строка {i}: «{m.group(0)}» без причины ({'; '.join(REASONS)}) в этой части "
                               f"предложения — …{near.strip()[:140]}…")
         for num in NUM_RE.findall(line):
-            if num.lower().rstrip(".-–") not in known_nums:
+            if norm_num(num) not in known_nums:
                 issues.append(f"отчёт, строка {i}: акт № {num} не в реестре")
     return issues
 
@@ -243,6 +280,12 @@ def add_refs(path, out_path, source):
     have = " ".join(f"{r['Документ']} {r['Где прочитан']}" for _, r in items).lower()
     keys = {doc_key(a.upper()) for a in re.findall(r"/view-document/[a-z]+/\d+", have)}
     names = [r["Документ"] for _, r in items]
+    acts = [(set(act_nums(r["Документ"])), set(DATE_RE.findall(r["Документ"]))) for _, r in items]
+
+    def known_act(num, date=""):
+        """Номер совпадает целиком («№ 15» ≠ «№ 150-З»); при двух датах — разные акты."""
+        return any(num in n and (not date or not d or date in d) for n, d in acts)
+
     new, section, kind = [], "", "refs"
     for line in out.splitlines():
         if line.startswith("--- "):
@@ -254,10 +297,10 @@ def add_refs(path, out_path, source):
         if ("реквизит" in section and "Акты" in section and len(cells) >= 3
                 and re.match(r"\d{2}\.\d{2}\.\d{4}$|без даты$", cells[0])):
             date = "" if cells[0] == "без даты" else f" от {cells[0]}"
-            doc, num = f"{cells[2]}{date} № {cells[1]}", cells[1].lower()
-            if f"№ {num}" in have or f"n {num}" in have:
+            doc, num = f"{cells[2]}{date} № {cells[1]}", norm_num(cells[1])
+            if known_act(num, "" if cells[0] == "без даты" else cells[0]):
                 continue
-            have += f" № {num}"
+            acts.append(({num}, set() if cells[0] == "без даты" else {cells[0]}))
         elif "Названы" in section and len(cells) == 2 and cells[1].isdigit():
             doc = cells[0]
             if same_name(doc, names):
@@ -267,10 +310,12 @@ def add_refs(path, out_path, source):
             addr, label = (cells[0], cells[3] if len(cells) > 3 else "") if cells[0].startswith("/view") \
                 else (cells[-1], cells[-2])
             key = doc_key(addr)
-            nums = [n.lower() for n in NUM_RE.findall(label)]
-            if key in keys or (kind == "refs" and any(f"№ {n}" in have or f"n {n}" in have for n in nums)):
+            nums = act_nums(label)
+            if key in keys or (kind == "refs" and nums and all(known_act(n) for n in nums)):
                 continue  # тот же документ уже есть по адресу или (для ссылок refs) по номеру
             keys.add(key)
+            if kind == "refs" and len(re.findall(r"\w+", label)) < 3 and len(cells) > 4:
+                label = f"«{label}» в абзаце: {cells[4][:150]}"  # текст ссылки из одного слова — не название
             doc = f"{label[:200]} — {key}" if label else key
         else:
             continue
