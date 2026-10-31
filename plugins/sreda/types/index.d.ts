@@ -24,6 +24,8 @@ export type Pending = {
   session?: string
   // Сессия, в которой ответили
   answeredIn?: string
+  // Не вопрос, а карточка «сессия закончила работу и стоит» (hooks/ostanovki.ts): одна кнопка «Ок», без своего ответа
+  kind?: 'ostanovka'
 }
 
 declare module 'claude-code' {

@@ -3,6 +3,8 @@ import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
+import { ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
+import type { Notice } from './ostanovki'
 import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
 import { slovaPrompt } from './slova'
@@ -49,7 +51,9 @@ const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
 const norm = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
 
 async function subproject($: any): Promise<boolean> {
-  const cwd = norm(String(await $.session.cwd()))
+  // Сессия в рабочей копии git (worktree) — `<проект>/.claude/worktrees/<имя>`: подпроект по папке самого проекта
+  // (слепая приёмка 31.10: у MobileData1C7 4 такие копии, и их сессии считались не подпроектом)
+  const cwd = norm(String(await $.session.cwd())).replace(/\/\.claude\/worktrees\/.*$/, '')
   const cut = cwd.lastIndexOf('/')
   if (cut <= 0) return false
   const parent = cwd.slice(0, cut)
@@ -152,7 +156,8 @@ async function refresh($: any): Promise<void> {
     await update($, picks, all => Object.fromEntries(Object.entries(all).filter(([id]) => list.some(one => one.id === id))))
   }
   const mine = await self($)
-  const now = new Set(list.filter(one => one.session === mine).map(one => one.id))
+  // Карточка остановки — не вопрос: её «Ок» не ответ сессии, сообщением его не шлём
+  const now = new Set(list.filter(one => one.session === mine && one.kind !== 'ostanovka').map(one => one.id))
   const gone = [...mineOpen].filter(id => !now.has(id))
   mineOpen = now
   if (gone.length === 0) return
@@ -191,6 +196,7 @@ function flush($: any): void {
 
 async function press($: any, it: Pending, answer: Answer): Promise<void> {
   if (!(await archive($, it.id, answer))) return
+  if (it.kind === 'ostanovka') return
   const reply = waiting.get(it.id)
   if (reply) return reply(answer)
   // Окно в другой сессии — она ответит ему сама при опросе файла
@@ -215,7 +221,7 @@ function writesPane(tool: string, e: any): boolean {
 
 // Пользователь ответил текстом, не нажав кнопку: найти открытый вопрос по тексту (целиком или частью) и в архив.
 async function answered($: any, question: string, answer: string): Promise<string> {
-  const list = await load($)
+  const list = (await load($)).filter(one => one.kind !== 'ostanovka')
   const exact = list.filter(one => one.question === question)
   const found = exact.length > 0 ? exact : list.filter(one => one.question.includes(question))
   if (found.length !== 1) {
@@ -379,7 +385,7 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
   const project = cwd.split('/').filter(Boolean).pop() || cwd
   const list = await load($)
   const ids = questions.map((q, k) => {
-    const same = list.find(one => one.question === q.question)
+    const same = list.find(one => one.question === q.question && one.kind !== 'ostanovka')
     if (same) {
       same.session = mine
       // Окно снова открыто — пометка «окно закрылось без ответа» больше не верна
@@ -421,10 +427,57 @@ async function enlist($: any, questions: Question[], callId: string, hold: (ids:
   return ids
 }
 
+// Карточка «сессия закончила работу и стоит» (hooks/ostanovki.ts): у сессии одна, новая заменяет прежнюю
+async function postNotice($: any, n: Notice): Promise<void> {
+  const mine = await self($)
+  const list = (await load($)).filter(one => !(one.kind === 'ostanovka' && one.session === mine))
+  list.push({
+    id: n.id,
+    from: n.from,
+    question: n.question,
+    why: n.why,
+    options: [{ label: 'Ок' }],
+    kind: 'ostanovka',
+    status: 'open',
+    asked: new Date().toISOString().slice(0, 10),
+    session: mine,
+  })
+  await save($, list)
+  await update($, items, () => list)
+  await reveal($, list)
+}
+
+// Сессия снова работает — её карточка в архив сама, без кнопки
+async function unpostNotice($: any): Promise<void> {
+  const mine = await self($)
+  for (const one of (await load($)).filter(it => it.kind === 'ostanovka' && it.session === mine)) {
+    await archive($, one.id, 'сессия продолжила работу')
+  }
+}
+
+async function hasOpenQuestion($: any): Promise<boolean> {
+  const mine = await self($)
+  return (await load($)).some(one => one.session === mine && one.kind !== 'ostanovka')
+}
+
 export const register: Register = on => {
   // Ход сессии идёт — ответы кнопкой на вопросы без окна ждут его конца (tell). Начало хода — один хук на модуль, он
   // в uroven.ts
   registerUroven(on, () => (busy = true))
+
+  // Поля хуков приложения: название сессии, ждёт ли она свою фоновую работу (hooks/ostanovki.ts)
+  on('classic.SessionStart', async ($, e, next) => {
+    ostTitle(e)
+    return next(e)
+  })
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    ostTitle(e)
+    return next(e)
+  })
+  on('classic.Stop', async ($, e, next) => {
+    ostStop(e)
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'zhdut-otveta', description: 'Открыть панель «Ждут ответа»' })
@@ -457,6 +510,12 @@ export const register: Register = on => {
     await startUroven($)
     await startPauza($)
     quiet = await subproject($)
+    await startOstanovki($, {
+      isSub: quiet,
+      post: n => postNotice($, n),
+      unpost: () => unpostNotice($),
+      hasOpen: () => hasOpenQuestion($),
+    }).catch(() => undefined)
     seen = undefined
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
@@ -475,6 +534,8 @@ export const register: Register = on => {
       void measure($)
       // Чем сессия ответила на пробуждение — в журнал пробуждений (hooks/probuzhdeniya.ts)
       await wakeDone($).catch(() => undefined)
+      // Сессия остановилась — через 3 минуты без нового хода карточка в панели (hooks/ostanovki.ts)
+      await ostTurnComplete($, e).catch(() => undefined)
     }
     return next(e)
   })
@@ -504,7 +565,10 @@ export const register: Register = on => {
 
   // Имя инструмента движок даёт при регистрации — сверяем с ним, а не с догадкой
   on('tool.call', async ($, e: any, next) => {
-    if (e.agentId === undefined && next.origin.plugin === 'engine') wakeTool(String(e.tool))
+    if (e.agentId === undefined && next.origin.plugin === 'engine') {
+      wakeTool(String(e.tool))
+      ostTool(String(e.tool), e)
+    }
     // На паузе — без новых сессий (hooks/pauza.ts); раньше уровня усилий: он сам отвечает за запуск сессий
     const stop = e.agentId === undefined && next.origin.plugin === 'engine' ? pauzaDeny(e.tool) : null
     if (stop) return stop
@@ -658,7 +722,17 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap={1}>
         {open.length === 0 && <Text dimColor>Все вопросы отвечены.</Text>}
-        {open.map(it => (
+        {open.map(it => it.kind === 'ostanovka' ? (
+          // Карточка остановки: прочитал — «Ок»; своего ответа нет — написать сессии можно в её чате
+          <Box key={it.id} flexDirection="column" gap={1} borderStyle="round" padding={1}>
+            <Text dimColor>{it.from}</Text>
+            <Text bold>{it.question}</Text>
+            {it.why ? <Text>{it.why}</Text> : null}
+            <Button key={`${it.id}:ok`} variant="primary" onPress={() => void press($, it, 'Ок')}>
+              Ок
+            </Button>
+          </Box>
+        ) : (
           <Box key={it.id} flexDirection="column" gap={1} borderStyle="round" padding={1}>
             <Text dimColor>{it.from}</Text>
             <Text bold>{it.question}</Text>
