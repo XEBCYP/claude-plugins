@@ -917,6 +917,74 @@ test('сессия сама просит передачу на 215 тыс. (пр
   await ui.unmount()
 })
 
+// Так приложение шлёт сообщение другой сессии (журнал разговора 31.10): isMeta, origin peer, hostInjected
+const peerMeta = (text: string) => ({ text, wait: false, isMeta: true, origin: { kind: 'peer', hostInjected: true } })
+
+async function askedBand($: any, env: any, clock: any): Promise<void> {
+  env.k = 207
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.turn.start({ text: 'пункт 26', turnId: 't1' })
+  await $.tool.call({ tool: 'mcp__autohandoff__peredat' } as never)
+  await $.turn.complete({ answer: 'Итог.', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't1' } as never)
+  await clock.settle()
+}
+
+test('31.10: сообщение другой сессии (isMeta) на 6-й секунде отсчёта по просьбе — передача, сообщение следом', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await askedBand($, env, clock)
+  const ui = await $.ui.mount(BAND)
+  await clock.advance(6_000)
+  const r = await $.prompt.submit(peerMeta('Глобальная: FYI 43babe6') as never)
+  await clock.settle()
+  expect(typeof (r as any).drop).toBe('string')
+  expect(env.commands.find(c => c.startsWith('autohandoff:write')) ?? '').toContain('Глобальная: FYI 43babe6')
+  await ui.unmount()
+})
+
+test('сообщение другой сессии (isMeta) во время записи документа — придержано, передача не срывается', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  await $.command.run({ command: 'autohandoff', args: 'now' } as never)
+  await clock.settle()
+  const r = await $.prompt.submit(peerMeta('Глобальная: продолжай') as never)
+  expect(typeof (r as any).drop).toBe('string')
+  await $.turn.start({ text: '/autohandoff:write', turnId: 'w' })
+  env.written = clock.now()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, reason: 'answer', turnId: 'w' } as never)
+  await clock.settle()
+  expect(env.commands).toContain('clear')
+  expect(env.submits[1]).toContain('Глобальная: продолжай')
+})
+
+test('ход по другому событию снял полосу просьбы — просьба остаётся: в конце хода снова полоса и передача', async ($, on) => {
+  const env = fresh()
+  const clock = engine(on, env)
+  await askedBand($, env, clock)
+  const ui = await $.ui.mount(BAND)
+  await clock.advance(3_000)
+  // Ход начался мимо prompt.submit (уведомление, событие приложения); проверка момента сказала бы «нет», как 31.10
+  env.fork = 'НЕТ'
+  await $.turn.start({ text: '<task-notification>', turnId: 't2' })
+  await $.turn.complete({ answer: 'Принял.', durationMs: 1, isAborted: false, reason: 'answer', turnId: 't2' } as never)
+  await clock.settle()
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(false)
+  await clock.advance(15_500)
+  expect(env.commands.some(c => c.startsWith('autohandoff:write'))).toBe(true)
+  await ui.unmount()
+})
+
+test('служебное isMeta не от другой сессии по-прежнему не придерживается', async ($, on) => {
+  const env = fresh()
+  env.k = 270
+  const clock = engine(on, env)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  const r = await $.prompt.submit({ text: 'skill body', wait: false, isMeta: true, origin: { kind: 'sdk' } } as never)
+  await clock.settle()
+  expect('drop' in (r as any)).toBe(false)
+})
+
 test('просьба о передаче: субагент и выключенная автопередача — отказ, передачи нет', async ($, on) => {
   const env = fresh()
   env.k = 180
