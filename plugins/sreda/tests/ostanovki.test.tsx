@@ -243,7 +243,11 @@ test('глобальная: отметка подпроекта «работае
   await clock.advance(5 * MIN)
   expect(list(env, MAIN)).toEqual([])
   await clock.advance(7 * MIN)
-  expect(list(env, MAIN).length).toBe(1)
+  // Подпроект с застывшей отметкой — ещё и карточка «ход оборван» о нём (docs/requirements/2026-10-31-obryv-hoda.md)
+  expect(list(env, MAIN).map(one => one.question).sort()).toEqual([
+    'Глобальная сессия и все подпроекты остановились',
+    'Сессия оборвана посреди хода',
+  ])
 })
 
 test('после перезапуска программы новый ход всё равно убирает старую карточку сессии', async ($, on) => {
@@ -293,4 +297,86 @@ test('ошибка глобальной — карточка «останови�
   env.mtimes[`${STATE}/sub-1.json`] = now
   await clock.advance(4 * MIN)
   expect(list(env, MAIN).map(one => one.question)).toEqual(['Глобальная сессия остановилась с ошибкой'])
+})
+
+// Оборванный ход (docs/requirements/2026-10-31-obryv-hoda.md)
+const CUT = '[Плагин sreda: прошлый ход этой сессии оборван.]'
+
+test('O01: прошлая отметка «ход идёт» — при запуске сессия сама получает «доделай начатое», отметка снята', async ($, on) => {
+  const env = newEnv()
+  env.files[`${STATE}/sess-1.json`] = JSON.stringify({ cwd: 'c:/projects/demo', busy: true, at: 900_000 })
+  engine(on, env)
+  await start($)
+  expect(env.submits.filter(s => s.startsWith(CUT)).length).toBe(1)
+  expect(JSON.parse(env.files[`${STATE}/sess-1.json`]).busy).toBe(false)
+})
+
+test('O07: ход закончился или прерван пользователем — отметка «не идёт», при запуске сообщения нет', async ($, on) => {
+  const env = newEnv()
+  engine(on, env)
+  await start($)
+  await turn($, { ...END, isAborted: true, reason: 'aborted' })
+  await start($)
+  expect(env.submits.filter(s => s.startsWith(CUT))).toEqual([])
+})
+
+test('O02: глобальная на паузе — при запуске после обрыва сообщения нет', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Global', id: 'glob' })
+  env.files['C:/Projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  engine(on, env)
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'pauza', args: '' } as never)
+  env.files[`${STATE}/glob.json`] = JSON.stringify({ cwd: 'c:/projects/global', busy: true, at: 900_000 })
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  expect(env.submits.filter(s => s.startsWith(CUT))).toEqual([])
+})
+
+test('O03/O04/O06: чужая отметка «ход идёт» без обновления дольше 10 минут — одна карточка «ход оборван»', async ($, on) => {
+  const env = newEnv()
+  const clock = engine(on, env)
+  const now = await clock.now()
+  env.files[`${STATE}/glob.json`] = JSON.stringify({ cwd: 'c:/projects/flower', title: 'Глобальный проект', busy: true, at: now })
+  // Старше суток и чужая законченная — без карточек
+  env.files[`${STATE}/old.json`] = JSON.stringify({ cwd: 'c:/projects/old', busy: true, at: now - 25 * 60 * MIN })
+  env.files[`${STATE}/done.json`] = JSON.stringify({ cwd: 'c:/projects/done', busy: false, at: now - 30 * MIN })
+  await start($)
+  await clock.advance(9 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+  await clock.advance(3 * MIN)
+  const cards = list(env, MAIN)
+  expect(cards.length).toBe(1)
+  expect(cards[0].id).toBe(`obryv-glob-${now}`)
+  expect(cards[0].session).toBe('glob')
+  expect(cards[0].from).toBe('flower')
+  expect(cards[0].question).toBe('Сессия «Глобальный проект» оборвана посреди хода')
+  // Ещё минуты — не дублируется; «Ок» — в архиве, снова не появляется
+  await clock.advance(5 * MIN)
+  expect(list(env, MAIN).length).toBe(1)
+  env.files[ARCHIVE] = JSON.stringify({ items: [{ ...cards[0], status: 'answered', answer: 'Ок' }] })
+  env.files[MAIN] = JSON.stringify({ items: [] })
+  await clock.advance(5 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+})
+
+test('O06: подпроект карточек об оборванных сессиях не даёт', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Sub', dirs: { 'c:/projects': ['Global', 'Sub'] } })
+  env.files['c:/projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  const clock = engine(on, env)
+  env.files[`${STATE}/glob.json`] = JSON.stringify({ cwd: 'c:/projects/global', busy: true, at: await clock.now() })
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  await clock.advance(15 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+})
+
+test('O05: оборванная сессия запустилась и пошёл ход — её карточка «ход оборван» в архиве', async ($, on) => {
+  const env = newEnv({ id: 'glob' })
+  env.files[MAIN] = JSON.stringify({
+    items: [{ id: 'obryv-glob-1', from: 'flower', question: 'q', why: 'w', options: [{ label: 'Ок' }], kind: 'ostanovka', status: 'open', asked: '2026-10-31', session: 'glob' }],
+  })
+  env.files[`${STATE}/glob.json`] = JSON.stringify({ cwd: 'c:/projects/demo', busy: true, at: 900_000 })
+  engine(on, env)
+  await start($)
+  await $.turn.start({ text: CUT, turnId: 't1' } as any)
+  expect(list(env, MAIN)).toEqual([])
+  expect(list(env, ARCHIVE).map(one => one.id)).toEqual(['obryv-glob-1'])
 })

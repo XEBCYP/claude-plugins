@@ -8,11 +8,18 @@
 // Чтобы глобальная знала, работают ли подпроекты, каждая сессия держит отметку ~/.claude/sreda-sessii/<id>.json
 // (папка, идёт ли ход, когда отмечена); идущий ход отмечается раз в минуту. Отметка без обновления дольше STALE_MS —
 // сессия закрыта посреди хода и считается стоящей.
+//
+// Оборванный ход (31.10.2026, требования — docs/requirements/2026-10-31-obryv-hoda.md). Приложение выгружает процесс
+// сессии при нехватке памяти («CliGovernor pressure evicting», ожидание фонового агента для него — простой), и ход
+// пропадает молча. Отметка такой сессии остаётся «ход идёт»: при новом запуске сессия сама получает «доделай начатое»,
+// а пока она стоит — другие сессии через STALE_MS дают карточку «ход оборван».
 
 // Задержка — окно 31.10: «3 минуты (рекомендую)»; по 934 ответам пользователя 56 % приходят раньше — карточки нет
 export const DELAY_MS = 3 * 60_000
 export const TICK_MS = 60_000
 export const STALE_MS = 10 * 60_000
+// Отметки старше суток — давно закрытые сессии, карточек о них не даём
+export const CUT_MAX_MS = 24 * 60 * 60_000
 const DIR = 'sreda-sessii'
 const REGISTRY = 'docs/Подпроекты.md'
 const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
@@ -26,6 +33,8 @@ type Hooks = {
   unpost: () => Promise<void>
   // Вопрос этой сессии ждёт в панели — карточка не нужна: сессия и так ждёт ответа
   hasOpen: () => Promise<boolean>
+  // Карточка о чужой оборванной сессии: одна на обрыв, session — её id
+  postCut: (n: Notice & { session: string }) => Promise<void>
 }
 
 const norm = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
@@ -44,6 +53,8 @@ let title = ''
 // Сессия сама проснётся (фоновая задача, таймер /loop, ScheduleWakeup) — она не стоит
 let wakesItself = false
 let posted = false
+// Прошлый процесс этой сессии выгружен посреди хода: время его последней отметки
+let cutAt: number | null = null
 
 async function home($: any): Promise<string> {
   const dir = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '.'
@@ -54,7 +65,7 @@ async function mark($: any): Promise<void> {
   if (!me) return
   const at = await $.clock.now()
   // Ждёт свою фоновую работу — для глобальной тоже «работает»: проснётся сама
-  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify({ cwd, busy: busy || wakesItself, at }))
+  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify({ cwd, title, busy: busy || wakesItself, at }))
 }
 
 export async function startOstanovki($: any, h: Hooks): Promise<void> {
@@ -72,8 +83,23 @@ export async function startOstanovki($: any, h: Hooks): Promise<void> {
   stoppedAt = null
   posted = false
   wakesItself = false
+  // До своей первой отметки: прошлая отметка «ход идёт» — прошлый процесс выгружен посреди хода
+  cutAt = null
+  try {
+    const was = JSON.parse(String(await $.fs.read(`${await home($)}/${DIR}/${me}.json`)))
+    if (was?.busy === true) cutAt = typeof was.at === 'number' ? was.at : 0
+  } catch {}
   await mark($).catch(() => undefined)
   $.clock.every(TICK_MS, () => void tick($).catch(() => undefined))
+}
+
+export const CUT_NOTE =
+  '[Плагин sreda: прошлый ход этой сессии оборван.] Приложение выгрузило процесс посреди хода (нехватка памяти или ' +
+  'перезапуск), ход закрыт без ответа, начатое не доделано. Посмотри конец своей переписки — план, последние вызовы, ' +
+  'отчёты фоновых агентов и сообщения подпроектов — и доделай начатое. Начатого не было — ответь одной строкой.'
+
+export function ostCut(): number | null {
+  return cutAt
 }
 
 // Название сессии — из полей хуков приложения (classic.SessionStart, classic.UserPromptSubmit)
@@ -144,7 +170,45 @@ async function subprojectsBusy($: any, now: number): Promise<boolean> {
 const brief = (text: string) => (text.length > BRIEF ? `${text.slice(0, BRIEF - 1)}…` : text)
 const two = (n: number) => String(n).padStart(2, '0')
 
+// Чужие оборванные сессии: отметка «ход идёт» не обновлялась дольше STALE_MS (идущий ход отмечается раз в минуту)
+async function cutOthers($: any, now: number): Promise<void> {
+  if (!hooks || hooks.isSub) return
+  const dir = `${await home($)}/${DIR}`
+  let entries: { name: string; mtimeMs?: number }[] = []
+  try {
+    entries = await $.fs.list(dir)
+  } catch {
+    return
+  }
+  for (const one of entries) {
+    if (!one.name.endsWith('.json') || one.name === `${me}.json`) continue
+    let it: { cwd?: string; title?: string; busy?: boolean; at?: number }
+    try {
+      it = JSON.parse(String(await $.fs.read(`${dir}/${one.name}`)))
+    } catch {
+      continue
+    }
+    if (it.busy !== true || typeof it.at !== 'number') continue
+    const age = now - it.at
+    if (age <= STALE_MS || age > CUT_MAX_MS) continue
+    const sid = one.name.slice(0, -'.json'.length)
+    const raw = String(it.cwd ?? '')
+    const from = raw.split('/').filter(Boolean).pop() || raw
+    const at = new Date(it.at)
+    await hooks.postCut({
+      id: `obryv-${sid}-${it.at}`,
+      session: sid,
+      from,
+      question: `${it.title ? `Сессия «${it.title}»` : 'Сессия'} оборвана посреди хода`,
+      why:
+        `Последняя отметка хода — ${two(at.getHours())}:${two(at.getMinutes())}: приложение выгрузило сессию (нехватка ` +
+        'памяти) или она закрыта. Откройте её — sreda сама попросит доделать начатое.',
+    })
+  }
+}
+
 async function tick($: any): Promise<void> {
+  await cutOthers($, await $.clock.now()).catch(() => undefined)
   if (busy || wakesItself) return void (await mark($))
   if (stoppedAt === null || posted || !hooks) return
   const now = await $.clock.now()
