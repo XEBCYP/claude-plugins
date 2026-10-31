@@ -245,3 +245,52 @@ test('глобальная: отметка подпроекта «работае
   await clock.advance(7 * MIN)
   expect(list(env, MAIN).length).toBe(1)
 })
+
+test('после перезапуска программы новый ход всё равно убирает старую карточку сессии', async ($, on) => {
+  const env = newEnv()
+  const clock = engine(on, env)
+  await start($)
+  await turn($)
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).length).toBe(1)
+  await start($)
+  await $.turn.start({ text: 'Продолжай', turnId: 't2' } as any)
+  expect(list(env, MAIN)).toEqual([])
+})
+
+test('сессия подпроекта в рабочей копии git (.claude/worktrees) — тоже подпроект, карточек нет', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Sub\\.claude\\worktrees\\r1', dirs: { 'c:/projects': ['Global', 'Sub'] } })
+  env.files['c:/projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  await turn($)
+  await clock.advance(10 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+})
+
+test('подпроект ждёт свою фоновую работу — его отметка «работает», и после хода тоже', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Sub', dirs: { 'c:/projects': ['Global', 'Sub'] } })
+  env.files['c:/projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'x', turnId: 't1' } as any)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'a1', type: 'subagent' }], session_crons: [] } as any)
+  await $.turn.complete(END)
+  await clock.advance(15 * MIN)
+  const it = JSON.parse(env.files[`${STATE}/sess-1.json`])
+  expect(it.busy).toBe(true)
+  expect(await clock.now() - it.at).toBeLessThan(2 * MIN)
+})
+
+test('ошибка глобальной — карточка «остановилась с ошибкой», даже пока подпроект работает', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Global', id: 'glob' })
+  env.files['C:/Projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  const clock = engine(on, env)
+  await $.session.start({ cwd: 'C:\\Projects\\Global', surface: 'desktop', isInteractive: true })
+  await turn($, { ...END, reason: 'error', answer: 'API Error' })
+  const now = await clock.now()
+  env.files[`${STATE}/sub-1.json`] = JSON.stringify({ cwd: 'c:/projects/sub', busy: true, at: now })
+  env.mtimes[`${STATE}/sub-1.json`] = now
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).map(one => one.question)).toEqual(['Глобальная сессия остановилась с ошибкой'])
+})

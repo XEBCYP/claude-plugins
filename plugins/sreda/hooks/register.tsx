@@ -51,7 +51,9 @@ const WHERE = /\*\*Где:\*\*\s*`([^`]+)`/g
 const norm = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').toLowerCase()
 
 async function subproject($: any): Promise<boolean> {
-  const cwd = norm(String(await $.session.cwd()))
+  // Сессия в рабочей копии git (worktree) — `<проект>/.claude/worktrees/<имя>`: подпроект по папке самого проекта
+  // (слепая приёмка 31.10: у MobileData1C7 4 такие копии, и их сессии считались не подпроектом)
+  const cwd = norm(String(await $.session.cwd())).replace(/\/\.claude\/worktrees\/.*$/, '')
   const cut = cwd.lastIndexOf('/')
   if (cut <= 0) return false
   const parent = cwd.slice(0, cut)

@@ -53,7 +53,8 @@ async function home($: any): Promise<string> {
 async function mark($: any): Promise<void> {
   if (!me) return
   const at = await $.clock.now()
-  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify({ cwd, busy, at }))
+  // Ждёт свою фоновую работу — для глобальной тоже «работает»: проснётся сама
+  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify({ cwd, busy: busy || wakesItself, at }))
 }
 
 export async function startOstanovki($: any, h: Hooks): Promise<void> {
@@ -98,10 +99,9 @@ export async function ostTurnStart($: any): Promise<void> {
   recap = ''
   wakesItself = false
   await mark($).catch(() => undefined)
-  if (posted) {
-    posted = false
-    await hooks?.unpost()
-  }
+  // Всегда, а не по флагу posted: после перезапуска программы флаг пуст, а карточка в файле осталась
+  posted = false
+  await hooks?.unpost()
 }
 
 export async function ostTurnComplete($: any, e: any): Promise<void> {
@@ -145,19 +145,22 @@ const brief = (text: string) => (text.length > BRIEF ? `${text.slice(0, BRIEF - 
 const two = (n: number) => String(n).padStart(2, '0')
 
 async function tick($: any): Promise<void> {
-  if (busy) return void (await mark($))
+  if (busy || wakesItself) return void (await mark($))
   if (stoppedAt === null || posted || !hooks) return
   const now = await $.clock.now()
-  if (now - stoppedAt < DELAY_MS || wakesItself) return
+  if (now - stoppedAt < DELAY_MS) return
   if (await hooks.hasOpen()) return
   const isGlobal = subPaths.length > 0
-  if (isGlobal && (await subprojectsBusy($, now))) return
+  // Ошибка глобальной — сразу: подпроекты без неё не продвинутся
+  if (isGlobal && !failed && (await subprojectsBusy($, now))) return
   const at = new Date(stoppedAt)
-  const name = title ? `Сессия «${title}»` : 'Сессия'
-  const question = isGlobal
-    ? `${title ? `Глобальная сессия «${title}»` : 'Глобальная сессия'} и все подпроекты остановились`
-    : failed
-      ? `${name} остановилась с ошибкой`
+  const name = isGlobal
+    ? title ? `Глобальная сессия «${title}»` : 'Глобальная сессия'
+    : title ? `Сессия «${title}»` : 'Сессия'
+  const question = failed
+    ? `${name} остановилась с ошибкой`
+    : isGlobal
+      ? `${name} и все подпроекты остановились`
       : `${name} завершила работу и ждёт`
   const said = recap || answer
   const why = `Остановилась в ${two(at.getHours())}:${two(at.getMinutes())}.${said ? ` Итог: ${brief(said)}` : ''}`
