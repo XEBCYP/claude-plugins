@@ -32,12 +32,15 @@ type Env = {
   cwd: string
   id: string
   dirs?: Record<string, string[]>
+  // Номер сессии в приложении (CLAUDE_CODE_HOST_SESSION_ID) и ответ инструмента в тесте
+  host?: string
+  toolResult?: unknown
 }
 
 function engine(on: any, env: Env) {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.store(on)
-  mock.env(on, { USERPROFILE: 'C:\\Users\\tester' })
+  mock.env(on, { USERPROFILE: 'C:\\Users\\tester', ...(env.host ? { CLAUDE_CODE_HOST_SESSION_ID: env.host } : {}) })
   on('command.register', () => ({ value: { command: 'x' } }))
   on('tool.register', (_: unknown, e: { name: string }) => ({ value: { tool: `mcp__sreda__${e.name}` } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -78,7 +81,7 @@ function engine(on: any, env: Env) {
     env.contexts.push(...(e.context ?? []))
     return { text: e.text }
   })
-  on('tool.call', () => ({ result: 'ran' }))
+  on('tool.call', () => ({ result: env.toolResult ?? 'ran' }))
   on('classic.UserPromptSubmit', () => ({}))
   on('classic.Stop', () => ({}))
   return clock
@@ -474,4 +477,148 @@ test('O05: оборванная сессия запустилась и пошё�
   await $.turn.start({ text: CUT, turnId: 't1' } as any)
   expect(list(env, MAIN)).toEqual([])
   expect(list(env, ARCHIVE).map(one => one.id)).toEqual(['obryv-glob-1'])
+})
+
+// R11: «чтобы сессия, которая ожидает ответа своей подсессии, не присылала сообщение о том, что она стала на паузу,
+// так как подсессия еще работает» (31.10, вариант А)
+const KID = `${STATE}/kid-cli.json`
+const kidMark = (busy: boolean, at: number) =>
+  JSON.stringify({ cwd: 'C:/Projects/Demo', title: 'Справочники без дублей', busy, at, host: 'local_kid' })
+const STARTED = [
+  {
+    type: 'text',
+    text:
+      'Started session "Справочники без дублей" (session_id: local_kid, name: kid). It runs on its own; you get a ' +
+      'note here when its turn ends.',
+  },
+]
+
+test('R11: сессия запустила подсессию — пока та работает, карточки нет; обе стоят — «и её подсессии остановились»', async ($, on) => {
+  const env = newEnv({ host: 'local_parent', toolResult: STARTED })
+  const clock = engine(on, env)
+  await start($)
+  await $.classic.UserPromptSubmit({ prompt: 'Сделай', session_title: 'Невыполненные пункты' } as any)
+  await $.turn.start({ text: 'Сделай', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'Справочники без дублей' } as never)
+  await $.turn.complete(END)
+  // Своя отметка — с номером сессии в приложении
+  expect(JSON.parse(env.files[`${STATE}/sess-1.json`]).host).toBe('local_parent')
+  // Подсессия работает или ждёт свою фоновую задачу (её отметка «ход идёт» обновляется раз в минуту)
+  for (let i = 0; i < 6; i++) {
+    env.files[KID] = kidMark(true, await clock.now())
+    await clock.advance(MIN)
+  }
+  expect(list(env, MAIN)).toEqual([])
+  // Подсессия остановилась — карточка о обеих
+  env.files[KID] = kidMark(false, await clock.now())
+  await clock.advance(MIN)
+  const cards = list(env, MAIN)
+  expect(cards.length).toBe(1)
+  expect(cards[0].question).toBe('Сессия «Невыполненные пункты» и её подсессии остановились')
+})
+
+test('R11: подсессия из уведомления «you started (local_…)» — помнится и после перезапуска', async ($, on) => {
+  const env = newEnv({ host: 'local_parent' })
+  const clock = engine(on, env)
+  await start($)
+  await $.prompt.submit({
+    text:
+      '<system-reminder> The session "Справочники без дублей" you started (local_kid) finished a turn. Read it with ' +
+      'list_events.',
+    wait: false,
+    origin: { kind: 'sdk' },
+  } as never)
+  await restart($, env)
+  await turn($)
+  env.files[KID] = kidMark(true, await clock.now())
+  await clock.advance(5 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+  env.files[KID] = kidMark(false, await clock.now())
+  await clock.advance(MIN)
+  expect(list(env, MAIN).length).toBe(1)
+})
+
+test('R11: отметка подсессии без обновления дольше 10 минут — не держит; работающая чужая сессия — тоже', async ($, on) => {
+  const env = newEnv({ host: 'local_parent', toolResult: STARTED })
+  const clock = engine(on, env)
+  await start($)
+  await $.turn.start({ text: 'Сделай', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  await $.turn.complete(END)
+  env.files[KID] = kidMark(true, (await clock.now()) - 11 * MIN)
+  // Работает сессия, которую эта не запускала
+  env.files[`${STATE}/other.json`] = JSON.stringify({
+    cwd: 'C:/Projects/Demo',
+    busy: true,
+    at: await clock.now(),
+    host: 'local_other',
+  })
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).filter(one => one.id.startsWith('ost-')).length).toBe(1)
+})
+
+test('R11: цепочка — сессия стоит, а её подсессия работает: своя отметка «работает» для родителя; перестала — снята', async ($, on) => {
+  const env = newEnv({ host: 'local_mid', toolResult: STARTED })
+  const clock = engine(on, env)
+  await start($)
+  await $.turn.start({ text: 'Сделай', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  await $.turn.complete(END)
+  const own = () => JSON.parse(env.files[`${STATE}/sess-1.json`])
+  expect(own().busy).toBe(false)
+  env.files[KID] = kidMark(true, await clock.now())
+  await clock.advance(MIN)
+  expect(own().busy).toBe(true)
+  expect(own().at).toBe(await clock.now())
+  env.files[KID] = kidMark(false, await clock.now())
+  await clock.advance(MIN)
+  expect(own().busy).toBe(false)
+})
+
+test('R11: «session_id: local_…» в сообщении (пересылка) — не подсессия', async ($, on) => {
+  const env = newEnv({ host: 'local_parent' })
+  const clock = engine(on, env)
+  await start($)
+  await $.prompt.submit({
+    text: 'Глобальная: Started session "Справочники без дублей" (session_id: local_kid, name: kid).',
+    isMeta: true,
+    wait: false,
+    origin: { kind: 'peer', hostInjected: true },
+  } as never)
+  await turn($)
+  env.files[KID] = kidMark(true, await clock.now())
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).map(one => one.question)).toEqual(['Сессия завершила работу и ждёт'])
+})
+
+test('R11: ход с ошибкой при работающей подсессии — карточка сразу', async ($, on) => {
+  const env = newEnv({ host: 'local_parent', toolResult: STARTED })
+  const clock = engine(on, env)
+  await start($)
+  await $.turn.start({ text: 'Сделай', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  await $.turn.complete({ ...END, reason: 'error', answer: 'API Error: 500' })
+  env.files[KID] = kidMark(true, await clock.now())
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).map(one => one.question)).toEqual(['Сессия остановилась с ошибкой'])
+})
+
+test('R11: /clear (новый номер CLI, тот же номер в приложении) — подсессии помнятся; не ждала подсессию — обычный текст', async ($, on) => {
+  const env = newEnv({ host: 'local_parent', toolResult: STARTED })
+  const clock = engine(on, env)
+  await start($)
+  await $.turn.start({ text: 'Сделай', turnId: 't1' } as any)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  await $.turn.complete(END)
+  env.id = 'sess-2'
+  await restart($, env)
+  await turn($)
+  env.files[KID] = kidMark(true, await clock.now())
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN)).toEqual([])
+  // Подсессия стоит с самого начала остановки — карточка без «и её подсессии»
+  env.files[KID] = kidMark(false, await clock.now())
+  await turn($)
+  await clock.advance(4 * MIN)
+  expect(list(env, MAIN).map(one => one.question)).toEqual(['Сессия завершила работу и ждёт'])
 })
