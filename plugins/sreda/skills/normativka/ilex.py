@@ -11,14 +11,19 @@ ilex пускает под одной учёткой один вход: новы
 
 Команды:
   python ilex.py status                      — есть ли вход, когда программа входила последний раз
-  python ilex.py search "<запрос>" [--n 15]  — «Найдено документов», обзор ilex и ссылки выдачи
+  python ilex.py search "<запрос>" [--tab <вкладка>] [--page N] [--all] [--n 25]
+                                             — «Найдено документов», обзор ilex и выдача по 25 (дата,
+                                               название, адрес); --all — все страницы подряд
   python ilex.py doc <ссылка> [--find "<слова>"] [--max 20000] [--full] [--out <файл>]
                                              — весь текст документа (экспорт в Word, запас — прокрутка);
                                                --full — для совместимости; --find — куски вокруг слов;
                                                --out — весь текст в файл
   python ilex.py doc <ссылка> --links [--find "<слова>"]
-                                             — абзацы с сегментами и ссылки документа (тип, адрес)
-  python ilex.py backlinks <ссылка> [--seg N] [--tab <вкладка>] [--page N] [--n 25]
+                                             — абзацы с сегментами и ссылки документа (тип, адрес);
+                                               с --find — по «Поиску в документе» ilex
+  python ilex.py refs <ссылка> [--max 30000] — акты, упомянутые в тексте: с реквизитами, по названию,
+                                               ссылки ilex на другие документы
+  python ilex.py backlinks <ссылка> [--seg N] [--tab <вкладка>] [--page N] [--all] [--n 25]
                                              — кто ссылается на абзац (или документ): письма,
                                                разъяснения, статьи, формы, суды
   python ilex.py editions <ссылка> [--n 30]  — все редакции с датой и состоянием
@@ -210,7 +215,7 @@ def wait_text(page, markers, timeout_s=25):
 LOST = "lost"
 
 
-def cmd_search(page, query, n):
+def cmd_search(page, query, tab, pg, all_pages, n):
     page.goto(BASE + "/search?query=" + urllib.parse.quote(query), wait_until="domcontentloaded")
     text = wait_text(page, ["Найдено документов", "ничего не найдено"])
     if text is None and on_login_page(page):
@@ -222,16 +227,18 @@ def cmd_search(page, query, n):
     text = page.evaluate("() => document.body.innerText")
     i = text.find("Найдено документов")
     head = text[i:i + 1500] if i >= 0 else text[:600]
-    links = page.evaluate("""() => { const seen = new Set(); const out = [];
-        for (const a of document.querySelectorAll('a[href*="/view-document/"]')) {
-            const t = a.innerText.trim().replace(/\\s+/g, ' ');
-            if (!t || seen.has(a.href)) continue; seen.add(a.href); out.push(a.href + ' | ' + t.slice(0, 160)); }
-        return out; }""")
     print(head.strip())
-    print("\n--- Ссылки выдачи ---")
-    for line in links[:n]:
-        print(line)
-    return 0
+    if i < 0:  # «ничего не найдено»
+        return 0
+    if tab:
+        state = click_tab(page, tab)
+        if state is None:
+            print(f"ilex: нет вкладки «{tab}»")
+            return 5
+        if state == "empty":
+            print(f"\n--- {tab}: ничего нет ---")
+            return 0
+    return page_through(page, tab or "Все", pg, all_pages, n)
 
 
 def full_url(url):
@@ -473,8 +480,10 @@ def search_hits(page, phrase, limit_s=WALK_LIMIT_S):
             cnt = page.evaluate(SEARCH_COUNT)
             if cnt and cnt != prev and page.evaluate(HIT_SEG):
                 break
+        if not cnt and not seen:  # счётчика нет — не «ноль совпадений», а поиск не ответил: пусть идёт прокрутка
+            return None
         if not cnt or not cnt[1]:
-            return segs, 0, True
+            return segs, total, bool(seen)
         k, total = cnt
         if k in seen:  # счётчик не сдвинулся или пошёл по кругу — все пройдены
             return segs, total, len(seen) >= total
@@ -511,7 +520,10 @@ def snippet(text, words, size=110):
 
 def print_links(page, words, max_chars, phrase=""):
     hits, head = search_hits(page, phrase) if words else None, ""
-    if hits is None:  # без --find или в прежнем оформлении — прокрутка всего документа с начала
+    if hits is None:  # без --find, в прежнем оформлении или поиск в документе не ответил — прокрутка с начала
+        if words:
+            head = (f"Поиск в документе «{phrase}» недоступен или не ответил — абзацы со всеми словами ищутся "
+                    "прокруткой всего документа")
         done = walk(page, WALK_LINKS)
         found = []
     else:
@@ -610,20 +622,23 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
     return 0
 
 
-# --- «Кто ссылается» (значок (i) у абзаца) и редакции ---
-
 # --- Акты, упомянутые в тексте: реквизиты (вид, дата, номер) и названия без реквизитов ---
 
 MONTHS = {m: i + 1 for i, m in enumerate(("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр",
                                           "октябр", "ноябр", "декабр"))}
 KIND = (r"(?:Закон\w*|Кодекс\w*|кодекс\w*|Указ\w*|указ\w*|Декрет\w*|декрет\w*|[Пп]остановлени\w+|[Пп]риказ\w*|"
         r"[Рр]ешени\w+|[Рр]аспоряжени\w+|[Пп]исьм\w+|[Рр]азъяснени\w+)")
-ACT_RE = re.compile(KIND + r"[^.;\n]{0,160}?\s+от\s+(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{4})\s*(?:г\.|года)?\s*"
-                    r"(?:N|№)\s*([\w/\-–.]*\w)")
+DATE = r"(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{4})\s*(?:г\.|года)?"
+NUM = r"(?:N|№)\s*([\w/\-–.]*\w)"
+ACT_RE = re.compile(KIND + r"[^.;\n]{0,160}?\s+от\s+" + DATE + r"\s*" + NUM)
+NUM_FIRST_RE = re.compile(KIND + r"[^.;\n]{0,80}?\s+" + NUM + r"\s+от\s+" + DATE)  # «Декрет № 7 от 23.11.2017»
+MORE_RE = re.compile(r"\s*(?:,|и)\s*от\s+" + DATE + r"\s*" + NUM)  # «… № 1 и от 2 февраля 2021 г. № 2»
 NAMED_RE = re.compile(r"(?:Положени(?:ем|е|я|ю|и)|Инструкци(?:ей|я|и|ю)|Правил(?:ами|ам|ах|а)?|Перечн(?:ем|ь|я|ю|е)|"
-                      r"Порядо?к(?:ом|а|е|у)?|Регламент\w*|Кодекс\w* Республики Беларусь|Закон\w* Республики Беларусь|"
-                      r"Трудов\w+ кодекс\w*|Налогов\w+ кодекс\w*|Гражданск\w+ кодекс\w*)"
-                      r"\s+(?:(?:о|об)\s+|«)[^,.;()\n»]{5,140}")
+                      r"Порядо?к(?:ом|а|е|у)?|Регламент\w*|Закон\w* Республики Беларусь)"
+                      r"\s+(?:(?:о|об)\s+|«)[^,.;()\n»]{3,140}")
+# Кодексы: «Трудового кодекса Республики Беларусь», «Кодекса Республики Беларусь об административных правонарушениях».
+CODE_RE = re.compile(r"(?:[А-ЯЁа-яё]+(?:ого|ым|ый|ом|ому|ой)\s+)?[Кк]одекс\w*\s+Республики\s+Беларусь"
+                     r"(?:\s+(?:о|об)\s+[^,.;()\n»]{3,100})?")
 
 
 def norm_date(d):
@@ -638,16 +653,26 @@ def norm_date(d):
 def find_refs(text):
     """Акты с реквизитами {(дата, номер): [вид, число упоминаний, первый кусок текста]} и названия без реквизитов."""
     acts, named = {}, {}
+
+    def add(date, num, kind, a, b):
+        key = (norm_date(date), num.rstrip(".-–"))
+        acts.setdefault(key, [kind[:110], 0, text[max(0, a - 80):b + 60].replace("\n", " ")])[1] += 1
+
     for m in ACT_RE.finditer(text):
-        key = (norm_date(m.group(1)), m.group(2).rstrip(".-–"))
-        kind = re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip()
-        kind = re.sub(r"\s+от$", "", kind)
-        a = acts.setdefault(key, [kind[:110], 0, text[max(0, m.start() - 80):m.end() + 60].replace("\n", " ")])
-        a[1] += 1
-    for m in NAMED_RE.finditer(text):
-        name = re.sub(r"\s+", " ", m.group(0)).strip()
-        k = re.sub(r"^(\w{5})\w*", r"\1", name.lower())[:70]  # «Положением о …» и «Положение о …» — одно
-        named.setdefault(k, [name, 0])[1] += 1
+        kind = re.sub(r"\s+от$", "", re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip())
+        add(m.group(1), m.group(2), kind, m.start(), m.end())
+        pos = m.end()
+        while (more := MORE_RE.match(text, pos)):  # перечень актов одного вида через «и от …»
+            add(more.group(1), more.group(2), kind, m.start(), more.end())
+            pos = more.end()
+    for m in NUM_FIRST_RE.finditer(text):
+        kind = re.sub(r"\s+(?:N|№)$", "", re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip())
+        add(m.group(2), m.group(1), kind, m.start(), m.end())
+    for rx in (NAMED_RE, CODE_RE):
+        for m in rx.finditer(text):
+            name = re.sub(r"\s+", " ", m.group(0)).strip()
+            k = " ".join(w[:5] for w in name.lower().split())[:70]  # «Положением о …» и «Положение о …» — одно
+            named.setdefault(k, [name, 0])[1] += 1
     return acts, named
 
 
@@ -655,9 +680,9 @@ def cmd_refs(page, url, max_chars):
     code = open_doc(page, url)
     if code:
         return code
-    text, how = text_by_word(page), "экспорт в Word"
+    text, how, whole = text_by_word(page), "экспорт в Word", True
     if text is None:
-        text, _ = text_by_scroll(page)
+        text, whole = text_by_scroll(page)
         how = "прокрутка (Word не скачался)"
     if on_login_page(page):
         return LOST
@@ -678,7 +703,9 @@ def cmd_refs(page, url, max_chars):
              "Каждый — в реестр источников; найти в ilex: search \"<номер>\" или по виду и дате."]
     for (dt, num), (kind, n, ctx) in sorted(acts.items(), key=lambda x: x[0][0][-4:] + x[0][0][3:5] + x[0][0][:2]):
         lines.append(f"{dt} | {num} | {kind} | {n} | …{ctx[:170]}…")
-    lines.append(f"\n--- Названы без реквизитов: {len(named)} (название | упоминаний) — реквизиты искать в тексте или ilex ---")
+    lines.append(f"\n--- Названы без реквизитов: {len(named)} (название | упоминаний) — реквизиты искать в тексте или ilex; "
+                 "список — подсказка по шаблонам, названия без «о / об» («Перечнем заболеваний») ловятся не все: "
+                 "при чтении нормы дописывать в реестр и их ---")
     lines += [f"{name} | {n}" for name, n in sorted(named.values(), key=lambda x: -x[1])]
     lines.append(f"\n--- Ссылки ilex на другие документы: {len(docs)} (адрес | тип | ссылок | текст ссылки | абзац) ---")
     for (ib, doc), (tp, n, t, para) in docs.items():
@@ -688,11 +715,15 @@ def cmd_refs(page, url, max_chars):
     print(out[:max_chars])
     if len(out) > max_chars:
         print(f"\n[обрезано: показано {max_chars} из {len(out)} знаков; больше — --max]")
-    if not done:
+    if not whole:
+        print(NOT_TO_END + "\n[акты и названия выше — только по собранной части текста]")
+    elif not done:
         print("\n[ВНИМАНИЕ: ссылки ilex собраны не до конца документа (прокрутка остановлена по времени); акты "
               "с реквизитами и названия выше — по всему тексту]")
     return 0
 
+
+# --- Списки: выдача поиска, «кто ссылается» (значок (i) у абзаца), редакции ---
 
 TABS = ["Все", "Законодательство", "Аналитика", "Формы", "Судебная практика"]
 LIST_ITEMS = """() => [...document.querySelectorAll('a.document-link[href*="/view-document/"]')].map(a => {
@@ -717,6 +748,47 @@ def print_list(page, n):
     for href, head, title in page.evaluate(LIST_ITEMS)[:n]:
         head = re.sub(r"^(\d{2}\.\d{2}\.\d{4})(?=\S)", r"\1 ", head)
         print(f"{head} | {title[:220]} | {clean_href(href)}")
+
+
+LIST_LIMIT_S = 200  # --all: вместе со входом и вкладками укладывается в тайм-аут команды 300 с
+
+
+def next_page(page):
+    """Следующие 25 списка (выдача, «кто ссылается»). False — это последняя страница."""
+    nxt = page.locator("button.mat-mdc-paginator-navigation-next").first
+    if not nxt.count() or nxt.is_disabled():
+        return False
+    before = page.evaluate(SHOWN)
+    nxt.evaluate("e => e.click()")
+    wait_shown(page, before)
+    page.wait_for_timeout(800)
+    return True
+
+
+def page_through(page, label, pg, all_pages, n):
+    """Напечатать страницу pg списка, с all_pages — и все следующие до конца (или до LIST_LIMIT_S)."""
+    k = 1
+    while k < pg and next_page(page):
+        k += 1
+    if k < pg:
+        print(f"\n[страницы {pg} нет — последняя {k}]")
+    end = time.monotonic() + LIST_LIMIT_S
+    while True:
+        if on_login_page(page):
+            return LOST
+        print(f"\n--- {label}, страница {k}: {page.evaluate(SHOWN)} (свежие сверху) ---")
+        print("дата и состояние | название | адрес")
+        print_list(page, n)
+        if not all_pages:
+            print("[следующие 25 — --page, все страницы сразу — --all]")
+            return 0
+        if time.monotonic() > end:
+            print(f"\n[ВНИМАНИЕ: листание остановлено по времени на странице {k}; продолжить — --page {k + 1} --all]")
+            return 0
+        if not next_page(page):
+            print("\n[конец списка]")
+            return 0
+        k += 1
 
 
 def parse_target(url, seg):
@@ -773,7 +845,7 @@ def click_tab(page, name):
     return "ok"
 
 
-def cmd_backlinks(page, url, seg, tab, pg, n):
+def cmd_backlinks(page, url, seg, tab, pg, all_pages, n):
     target = parse_target(full_url(url), seg)
     if not target:
         print("ilex: нужен адрес документа вида /view-document/BELAW/<номер>[#M<сегмент>], --seg — M<цифры>")
@@ -814,20 +886,7 @@ def cmd_backlinks(page, url, seg, tab, pg, n):
         if state == "empty":
             print(f"\n--- {tab}: ничего нет ---")
             return 0
-    for _ in range(pg - 1):
-        nxt = page.locator("button.mat-mdc-paginator-navigation-next").first
-        if not nxt.count() or nxt.is_disabled():
-            break
-        before = page.evaluate(SHOWN)
-        nxt.evaluate("e => e.click()")
-        wait_shown(page, before)
-        page.wait_for_timeout(800)
-    if on_login_page(page):
-        return LOST
-    print(f"\n--- {tab or 'Все'}: {page.evaluate(SHOWN)} (свежие сверху; следующие 25 — --page) ---")
-    print("дата и состояние | название | адрес")
-    print_list(page, n)
-    return 0
+    return page_through(page, tab or "Все", pg, all_pages, n)
 
 
 def cmd_editions(page, url, n):
@@ -858,7 +917,10 @@ def main():
     sub.add_parser("status")
     s = sub.add_parser("search")
     s.add_argument("query")
-    s.add_argument("--n", type=int, default=15)
+    s.add_argument("--tab", choices=TABS)
+    s.add_argument("--page", type=int, default=1)
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--n", type=int, default=25)
     d = sub.add_parser("doc")
     d.add_argument("url")
     d.add_argument("--find")
@@ -871,6 +933,7 @@ def main():
     b.add_argument("--seg")
     b.add_argument("--tab", choices=TABS)
     b.add_argument("--page", type=int, default=1)
+    b.add_argument("--all", action="store_true")
     b.add_argument("--n", type=int, default=25)
     r = sub.add_parser("refs")
     r.add_argument("url")
@@ -910,13 +973,13 @@ def run(args):
                 return code
             for attempt in range(2):
                 if args.cmd == "search":
-                    code = cmd_search(page, args.query, args.n)
+                    code = cmd_search(page, args.query, args.tab, args.page, args.all, args.n)
                 elif args.cmd == "doc":
                     code = cmd_doc(page, args.url, args.find, args.max, args.full, args.links, args.out)
                 elif args.cmd == "refs":
                     code = cmd_refs(page, args.url, args.max)
                 elif args.cmd == "backlinks":
-                    code = cmd_backlinks(page, args.url, args.seg, args.tab, args.page, args.n)
+                    code = cmd_backlinks(page, args.url, args.seg, args.tab, args.page, args.all, args.n)
                 else:
                     code = cmd_editions(page, args.url, args.n)
                 if code != LOST:
