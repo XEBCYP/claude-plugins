@@ -15,6 +15,7 @@
 
 import { atom, update } from 'claude-code'
 
+import { ostTurnStart } from './ostanovki'
 import { showEffort } from './stroka'
 import { ownText } from './tekst'
 
@@ -302,6 +303,8 @@ export function registerUroven(on: any, started: () => void = () => {}): void {
   on('turn.start', async ($: any, e: any, next: any) => {
     if (e.agentId === undefined) {
       started()
+      // Сессия снова работает — её карточка «стоит» уходит из панели (hooks/ostanovki.ts)
+      await ostTurnStart($).catch(() => undefined)
       const wanted = manual ? undefined : judge(String(e.text ?? ''))
       if (wanted) await guess($, wanted)
     }
