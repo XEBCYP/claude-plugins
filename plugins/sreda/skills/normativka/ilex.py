@@ -26,7 +26,7 @@ ilex пускает под одной учёткой один вход: новы
   python ilex.py backlinks <ссылка> [--seg N] [--tab <вкладка>] [--page N] [--all] [--n 25]
                                              — кто ссылается на абзац (или документ): письма,
                                                разъяснения, статьи, формы, суды
-  python ilex.py editions <ссылка> [--n 30]  — все редакции с датой и состоянием
+  python ilex.py editions <ссылка> [--n 0]   — все редакции: состояние, дата, адрес каждой (--n N — первые N)
 
   status только смотрит, есть ли вход, и никогда не входит сама.
 
@@ -226,7 +226,14 @@ def cmd_search(page, query, tab, pg, all_pages, n):
     page.wait_for_timeout(1500)
     text = page.evaluate("() => document.body.innerText")
     i = text.find("Найдено документов")
-    head = text[i:i + 1500] if i >= 0 else text[:600]
+    if i >= 0:  # шапка и обзор ilex — до первой строки выдачи («дата» / «star» / «Добавить в избранное»)
+        k = text.find("\nstar\nДобавить в избранное", i)
+        k = text.rfind("\n", i, k) if k > 0 else -1
+        head = text[i:k] if k > i else text[i:i + 6000]
+        if k <= i and len(text) > i + 6000:
+            head += "\n[шапка выдачи обрезана на 6000 знаках: начало списка не найдено]"
+    else:
+        head = text[:600]
     print(head.strip())
     if i < 0:  # «ничего не найдено»
         return 0
@@ -599,7 +606,7 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
     if words:
         low = text.lower()
         hits, pos = [], 0
-        while len(hits) < 15:
+        while True:  # все куски; вывод ограничен --max с пометкой
             j = low.find(words[0], pos)
             if j < 0:
                 break
@@ -609,9 +616,13 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
                 pos = b  # следующий кусок — после этого, без повторов
             else:
                 pos = j + 1
-        print(f"{page.url}\nТекст: {how}, {len(text)} знаков. Совпадений «{find}»: {len(hits)}")
-        for h in hits:
-            print("\n=====\n" + h)
+        print(f"{page.url}\nТекст: {how}, {len(text)} знаков. Кусков с «{find}»: {len(hits)} (все в тексте)")
+        body = "".join("\n=====\n" + h for h in hits)
+        print(body[:max_chars])
+        if len(body) > max_chars:
+            k = body[:max_chars].count("\n=====\n")
+            print(f"\n[обрезано: показано {max_chars} из {len(body)} знаков (кусков {k} из {len(hits)}, последний — "
+                  "может быть не целиком); остальные — --max больше или --out и Grep]")
         if not done:
             print(NOT_TO_END)
         return 0
@@ -629,15 +640,19 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
 MONTHS = {m: i + 1 for i, m in enumerate(("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр",
                                           "октябр", "ноябр", "декабр"))}
 KIND = (r"(?:Закон\w*|Кодекс\w*|кодекс\w*|Указ\w*|указ\w*|Декрет\w*|декрет\w*|[Пп]остановлени\w+|[Пп]риказ\w*|"
-        r"[Рр]ешени\w+|[Рр]аспоряжени\w+|[Пп]исьм\w+|[Рр]азъяснени\w+)")
+        r"[Рр]ешени\w+|[Рр]аспоряжени\w+|[Пп]исьм\w+|[Рр]азъяснени\w+|[Сс]оглашени\w+|[Кк]онвенци\w+|[Дд]оговор\w*|"
+        r"[Дд]иректив\w+|[Пп]ротокол\w*)")
 DATE = r"(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{4})\s*(?:г\.|года)?"
 NUM = r"(?:N|№)\s*([\w/\-–.]*\w)"
 ACT_RE = re.compile(KIND + r"[^.;\n]{0,160}?\s+от\s+" + DATE + r"\s*" + NUM)
 NUM_FIRST_RE = re.compile(KIND + r"[^.;\n]{0,80}?\s+" + NUM + r"\s+от\s+" + DATE)  # «Декрет № 7 от 23.11.2017»
-MORE_RE = re.compile(r"\s*(?:,|и)\s*от\s+" + DATE + r"\s*" + NUM)  # «… № 1 и от 2 февраля 2021 г. № 2»
+# «… № 1 и от 2 февраля 2021 г. № 2», «постановления Минфина от … № 102, Минтруда от … № 3»
+MORE_RE = re.compile(r"\s*(?:,|и)\s*(?:[А-ЯЁ][^\s,;.]*(?:\s+[^\s,;.]+){0,9}?\s+)?от\s+" + DATE + r"\s*" + NUM)
+NO_DATE_RE = re.compile(KIND + r"[^.;\n]{0,80}?\s+" + NUM + r"(?!\s+от\s)")  # «Указом … N 240» — без даты
 NAMED_RE = re.compile(r"(?:Положени(?:ем|е|я|ю|и)|Инструкци(?:ей|я|и|ю)|Правил(?:ами|ам|ах|а)?|Перечн(?:ем|ь|я|ю|е)|"
                       r"Порядо?к(?:ом|а|е|у)?|Регламент\w*|Закон\w* Республики Беларусь)"
-                      r"\s+(?:(?:о|об)\s+|«)[^,.;()\n»]{3,140}")
+                      r"\s+(?:(?:о|об|по)\s+|«)(?:(?!\s+и\s+[А-ЯЁ])[^,.;()\n»]){3,140}"  # «… и Положением о …» — два
+                      r"|Конституци(?:я|и|ей|ю)\s+Республики\s+Беларусь")
 # Кодексы: «Трудового кодекса Республики Беларусь», «Кодекса Республики Беларусь об административных правонарушениях».
 CODE_RE = re.compile(r"(?:[А-ЯЁа-яё]+(?:ого|ым|ый|ом|ому|ой)\s+)?[Кк]одекс\w*\s+Республики\s+Беларусь"
                      r"(?:\s+(?:о|об)\s+[^,.;()\n»]{3,100})?")
@@ -657,7 +672,9 @@ def find_refs(text):
     acts, named = {}, {}
 
     def add(date, num, kind, a, b):
-        key = (norm_date(date), num.rstrip(".-–"))
+        starts = [k.start() for k in re.finditer(KIND, kind)]
+        kind = kind[starts[-1]:] if starts else kind  # «Указом … N 240 и постановлением» — вид последнего акта
+        key = (norm_date(date) if date else "без даты", num.rstrip(".-–"))
         acts.setdefault(key, [kind[:110], 0, text[max(0, a - 80):b + 60].replace("\n", " ")])[1] += 1
 
     for m in ACT_RE.finditer(text):
@@ -665,11 +682,19 @@ def find_refs(text):
         add(m.group(1), m.group(2), kind, m.start(), m.end())
         pos = m.end()
         while (more := MORE_RE.match(text, pos)):  # перечень актов одного вида через «и от …»
-            add(more.group(1), more.group(2), kind, m.start(), more.end())
+            body = re.sub(r"\s+", " ", more.group(0)[:more.start(1) - more.start()]).strip(" ,и")
+            body = re.sub(r"\s*от$", "", body)  # «Минтруда» в «…, Минтруда от … № 3» — орган другой
+            add(more.group(1), more.group(2), f"{kind.split()[0]} {body}" if body else kind, m.start(), more.end())
             pos = more.end()
     for m in NUM_FIRST_RE.finditer(text):
         kind = re.sub(r"\s+(?:N|№)$", "", re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip())
         add(m.group(2), m.group(1), kind, m.start(), m.end())
+    dated = {num for _, num in acts}
+    for m in NO_DATE_RE.finditer(text):  # номера без даты — только те, которых нет среди актов с датой
+        num = m.group(1).rstrip(".-–")
+        if num not in dated:
+            kind = re.sub(r"\s+(?:N|№)$", "", re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip())
+            add("", num, kind, m.start(), m.end())
     for rx in (NAMED_RE, CODE_RE):
         for m in rx.finditer(text):
             name = re.sub(r"\s+", " ", m.group(0)).strip()
@@ -706,7 +731,7 @@ def cmd_refs(page, url, max_chars):
     for (dt, num), (kind, n, ctx) in sorted(acts.items(), key=lambda x: x[0][0][-4:] + x[0][0][3:5] + x[0][0][:2]):
         lines.append(f"{dt} | {num} | {kind} | {n} | …{ctx[:170]}…")
     lines.append(f"\n--- Названы без реквизитов: {len(named)} (название | упоминаний) — реквизиты искать в тексте или ilex; "
-                 "список — подсказка по шаблонам, названия без «о / об» («Перечнем заболеваний») ловятся не все: "
+                 "список — подсказка по шаблонам, названия без «о / об / по» («Перечнем заболеваний») ловятся не все: "
                  "при чтении нормы дописывать в реестр и их ---")
     lines += [f"{name} | {n}" for name, n in sorted(named.values(), key=lambda x: -x[1])]
     lines.append(f"\n--- Ссылки ilex на другие документы: {len(docs)} (адрес | тип | ссылок | текст ссылки | абзац) ---")
@@ -747,9 +772,12 @@ def wait_shown(page, before, timeout_s=20):
 
 
 def print_list(page, n):
-    for href, head, title in page.evaluate(LIST_ITEMS)[:n]:
+    items = page.evaluate(LIST_ITEMS)
+    for href, head, title in items[:n]:
         head = re.sub(r"^(\d{2}\.\d{2}\.\d{4})(?=\S)", r"\1 ", head)
         print(f"{head} | {title[:220]} | {clean_href(href)}")
+    if len(items) > n:
+        print(f"[на этой странице показано {n} из {len(items)} — --n {len(items)}]")
 
 
 LIST_LIMIT_S = 200  # --all: вместе со входом и вкладками укладывается в тайм-аут команды 300 с
@@ -895,23 +923,72 @@ def cmd_backlinks(page, url, seg, tab, pg, all_pages, n):
     return page_through(page, tab or "Все", pg, all_pages, n)
 
 
+EDITION_ITEM = "il-document-editions-selection-list-item"
+EDITION_ROWS = """() => [...document.querySelectorAll('il-document-editions-selection-list-item')].map(e => [
+    (e.querySelector('.edition-title') || {}).innerText || '', (e.querySelector('.edition-date') || {}).innerText || '',
+    e.classList.contains('highlighted')])"""
+
+
+def open_editions(page):
+    """Открыть панель «Список редакций документа». None — открыта, иначе код или текст причины."""
+    icon = page.locator("mat-icon[data-mat-icon-name*='redactions']").first
+    if not icon.count():
+        return "нет"
+    icon.evaluate("e => (e.closest('button') || e).click()")
+    if wait_text(page, ["Список редакций"]) is None:
+        return LOST if on_login_page(page) else 5
+    for _ in range(20):  # строки дорисовываются после заголовка
+        page.wait_for_timeout(500)
+        if page.locator(EDITION_ITEM).count():
+            break
+    return None
+
+
 def cmd_editions(page, url, n):
+    """Редакции из панели документа: в панели нет ссылок, поэтому адрес каждой — нажатием на строку."""
     code = open_doc(page, url)
     if code:
         return code
-    icon = page.locator("mat-icon[data-mat-icon-name*='redactions']").first
-    if not icon.count():
+    here = clean_href(page.url).split("#")[0].rstrip("/")
+    got = open_editions(page)
+    if got == "нет":
         print(f"{page.url}\nilex: у документа нет списка редакций")
         return 0
-    icon.evaluate("e => (e.closest('button') || e).click()")
-    if wait_text(page, ["Список редакций"]) is None:
-        if on_login_page(page):
-            return LOST
-        print("ilex: список редакций не загрузился за 25 с")
+    if got:
+        if got == 5:
+            print("ilex: список редакций не загрузился за 25 с")
+        return got
+    rows = page.evaluate(EDITION_ROWS)
+    if not rows:
+        print(f"{page.url}\n[ВНИМАНИЕ: панель редакций открылась, но строк в ней нет — разметка ilex сменилась; "
+              "редакции не получены]")
         return 5
-    page.wait_for_timeout(1500)
-    print(page.url + "\n--- Редакции: дата редакции и состояние | название | адрес ---")
-    print_list(page, n)
+    print(f"{page.url}\n--- Редакции: {len(rows)} (состояние | ред. от | адрес; «открыта» — эта ссылка) ---")
+    end, shown = time.monotonic() + LIST_LIMIT_S, rows[:n] if n else rows
+    for k, (state, date, current) in enumerate(shown):
+        addr = here + " (открыта)" if current else ""
+        if not current and time.monotonic() < end:
+            item = page.locator(EDITION_ITEM).nth(k)
+            item.locator(".edition-info-container").first.click()
+            for _ in range(20):
+                page.wait_for_timeout(500)
+                if clean_href(page.url).split("#")[0].rstrip("/") != here:
+                    break
+            addr = clean_href(page.url).split("#")[0].rstrip("/")
+            if addr == here:
+                addr = "(адрес не получен: строка не открылась)"
+            if k + 1 < len(shown):  # назад к документу и панели — за адресом следующей строки
+                code = open_doc(page, url) or open_editions(page)
+                if code:
+                    print(f"{state} | {date} | {addr}")
+                    print("[ВНИМАНИЕ: после перехода по редакции панель не открылась снова — адреса остальных не "
+                          "получены]")
+                    return code if code in (LOST, 5) else 5
+        elif not current:
+            addr = "(адрес не получен: остановлено по времени — повторить с --n меньше)"
+        print(f"{state} | {date} | {addr}")
+    if len(shown) < len(rows):
+        print(f"\n[показано {len(shown)} из {len(rows)} редакций; все — --n 0]")
     return 0
 
 
@@ -946,7 +1023,7 @@ def main():
     r.add_argument("--max", type=int, default=30000)
     e = sub.add_parser("editions")
     e.add_argument("url")
-    e.add_argument("--n", type=int, default=30)
+    e.add_argument("--n", type=int, default=0)
     args = ap.parse_args()
 
     os.makedirs(HOME, exist_ok=True)
