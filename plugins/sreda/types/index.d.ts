@@ -38,6 +38,9 @@ declare module 'claude-code' {
       picked: Record<string, string[]>
       uroven: { isSession: boolean; picked: string | number | null }
       urovenRuchnoj: string | null
+      // ostanovki — процесс этой сессии (hooks/ostanovki.ts): перезагрузка плагина в нём — не обрыв хода; sent —
+      // «доделай начатое» уже отправлено
+      ostanovki: { id: string; sent: boolean }
     }
   }
 }

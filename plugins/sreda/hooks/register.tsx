@@ -3,9 +3,9 @@ import type { Register } from 'claude-code'
 
 import type { Option, Pending } from '../types'
 import { gitCall } from './git'
-import { CUT_NOTE, ostCut, ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
+import { CUT_NOTE, ostCutDue, ostCutSent, ostStop, ostTitle, ostTool, ostTurnComplete, startOstanovki } from './ostanovki'
 import type { Notice } from './ostanovki'
-import { isPaused, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
+import { isPaused, pausedAnywhere, pauzaCommand, pauzaDeny, pauzaPrompt, startPauza } from './pauza'
 import { wakeCheck, wakeDone, wakeTool } from './probuzhdeniya'
 import { slovaPrompt } from './slova'
 import { MEASURE_MS, measure, resetStroka } from './stroka'
@@ -537,8 +537,12 @@ export const register: Register = on => {
       hasOpen: () => hasOpenQuestion($),
       postCut: n => postCut($, n),
     }).catch(() => undefined)
-    // Прошлый процесс выгружен посреди хода — доделать начатое; на паузе — только после «продолжай» (hooks/ostanovki.ts)
-    if (ostCut() !== null && !isPaused()) void $.prompt.submit({ text: CUT_NOTE }).catch(() => undefined)
+    // Прошлый процесс выгружен посреди хода — доделать начатое; на паузе — с первым сообщением после «продолжай»
+    // (hooks/ostanovki.ts)
+    if (ostCutDue() && !(await pausedAnywhere($))) {
+      await ostCutSent($)
+      void $.prompt.submit({ text: CUT_NOTE }).catch(() => undefined)
+    }
     seen = undefined
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
@@ -581,6 +585,11 @@ export const register: Register = on => {
     const drop = await wakeCheck($, e).catch(() => null)
     if (drop) return { drop }
     const notes = [await pauzaPrompt($, e), slovaPrompt(e)].filter((n): n is string => n !== null)
+    // Обрыв, отложенный паузой: пауза снята («продолжай» или /prodolzhit) — доделать начатое (hooks/ostanovki.ts)
+    if (ostCutDue() && !(await pausedAnywhere($))) {
+      await ostCutSent($)
+      notes.push(CUT_NOTE)
+    }
     return next(notes.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...notes] })
   })
 

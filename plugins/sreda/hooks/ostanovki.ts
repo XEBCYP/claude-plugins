@@ -12,7 +12,10 @@
 // Оборванный ход (31.10.2026, требования — docs/requirements/2026-10-31-obryv-hoda.md). Приложение выгружает процесс
 // сессии при нехватке памяти («CliGovernor pressure evicting», ожидание фонового агента для него — простой), и ход
 // пропадает молча. Отметка такой сессии остаётся «ход идёт»: при новом запуске сессия сама получает «доделай начатое»,
-// а пока она стоит — другие сессии через STALE_MS дают карточку «ход оборван».
+// а пока она стоит — другие сессии через STALE_MS дают карточку «ход оборван». Перезагрузка плагина в том же процессе
+// (session.start снова, ход или ожидание фоновой задачи идут) — не обрыв: процесс помечен в $.state, который живёт, пока
+// жив процесс. Обрыв помнится в отметке (поле cut), пока не начнётся ход: сообщение не дошло или пришло на паузе — не
+// пропадёт.
 
 // Задержка — окно 31.10: «3 минуты (рекомендую)»; по 934 ответам пользователя 56 % приходят раньше — карточки нет
 export const DELAY_MS = 3 * 60_000
@@ -42,6 +45,8 @@ const norm = (path: string) => path.split('\\').join('/').replace(/\/+$/, '').to
 let hooks: Hooks | undefined
 let me = ''
 let cwd = ''
+// Папка для отметки: как есть, только косые прямые — проект в карточке с его заглавными буквами
+let shown = ''
 let project = ''
 let subPaths: string[] = []
 let busy = false
@@ -53,8 +58,11 @@ let title = ''
 // Сессия сама проснётся (фоновая задача, таймер /loop, ScheduleWakeup) — она не стоит
 let wakesItself = false
 let posted = false
-// Прошлый процесс этой сессии выгружен посреди хода: время его последней отметки
+// Прошлый процесс этой сессии выгружен посреди хода: время его последней отметки; держится до начала хода
 let cutAt: number | null = null
+// «Доделай начатое» этим процессом уже отправлено
+let cutSent = false
+const PROC = { plugin: 'sreda', key: 'ostanovki' } as const
 
 async function home($: any): Promise<string> {
   const dir = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '.'
@@ -65,7 +73,8 @@ async function mark($: any): Promise<void> {
   if (!me) return
   const at = await $.clock.now()
   // Ждёт свою фоновую работу — для глобальной тоже «работает»: проснётся сама
-  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify({ cwd, title, busy: busy || wakesItself, at }))
+  const it = { cwd: shown, title, busy: busy || wakesItself, at, ...(cutAt !== null ? { cut: cutAt } : {}) }
+  await $.fs.write(`${await home($)}/${DIR}/${me}.json`, JSON.stringify(it))
 }
 
 export async function startOstanovki($: any, h: Hooks): Promise<void> {
@@ -73,6 +82,7 @@ export async function startOstanovki($: any, h: Hooks): Promise<void> {
   me = String(await $.session.id())
   const raw = String(await $.session.cwd())
   cwd = norm(raw)
+  shown = raw.split('\\').join('/').replace(/\/+$/, '')
   project = raw.split('\\').join('/').split('/').filter(Boolean).pop() || raw
   subPaths = []
   try {
@@ -83,12 +93,22 @@ export async function startOstanovki($: any, h: Hooks): Promise<void> {
   stoppedAt = null
   posted = false
   wakesItself = false
-  // До своей первой отметки: прошлая отметка «ход идёт» — прошлый процесс выгружен посреди хода
+  // Тот же процесс (перезагрузка плагина) — отметка «ход идёт» его собственная, не обрыв
+  let proc: { id?: string; sent?: boolean } | undefined
+  try {
+    proc = (await $.state.get(PROC)).value
+  } catch {}
+  const same = proc?.id === me
+  cutSent = same && proc?.sent === true
+  // До своей первой отметки: прошлая отметка «ход идёт» — прошлый процесс выгружен посреди хода; cut — обрыв, после
+  // которого хода ещё не было
   cutAt = null
   try {
     const was = JSON.parse(String(await $.fs.read(`${await home($)}/${DIR}/${me}.json`)))
-    if (was?.busy === true) cutAt = typeof was.at === 'number' ? was.at : 0
+    if (typeof was?.cut === 'number') cutAt = was.cut
+    else if (was?.busy === true && !same) cutAt = typeof was.at === 'number' ? was.at : 0
   } catch {}
+  await $.state.set(PROC, { id: me, sent: cutSent }).catch(() => undefined)
   await mark($).catch(() => undefined)
   $.clock.every(TICK_MS, () => void tick($).catch(() => undefined))
 }
@@ -98,8 +118,14 @@ export const CUT_NOTE =
   'перезапуск), ход закрыт без ответа, начатое не доделано. Посмотри конец своей переписки — план, последние вызовы, ' +
   'отчёты фоновых агентов и сообщения подпроектов — и доделай начатое. Начатого не было — ответь одной строкой.'
 
-export function ostCut(): number | null {
-  return cutAt
+// Обрыв есть, а «доделай начатое» этим процессом ещё не отправлено
+export function ostCutDue(): boolean {
+  return cutAt !== null && !cutSent
+}
+
+export async function ostCutSent($: any): Promise<void> {
+  cutSent = true
+  await $.state.set(PROC, { id: me, sent: true }).catch(() => undefined)
 }
 
 // Название сессии — из полей хуков приложения (classic.SessionStart, classic.UserPromptSubmit)
@@ -121,6 +147,7 @@ export function ostStop(e: any): void {
 
 export async function ostTurnStart($: any): Promise<void> {
   busy = true
+  cutAt = null
   stoppedAt = null
   recap = ''
   wakesItself = false
@@ -170,9 +197,10 @@ async function subprojectsBusy($: any, now: number): Promise<boolean> {
 const brief = (text: string) => (text.length > BRIEF ? `${text.slice(0, BRIEF - 1)}…` : text)
 const two = (n: number) => String(n).padStart(2, '0')
 
-// Чужие оборванные сессии: отметка «ход идёт» не обновлялась дольше STALE_MS (идущий ход отмечается раз в минуту)
+// Чужие оборванные сессии: отметка «ход идёт» не обновлялась дольше STALE_MS (идущий ход отмечается раз в минуту).
+// Смотрят все сессии, и подпроекты: открыты только глобальная и её подпроекты, выгружена глобальная — иначе карточки нет
 async function cutOthers($: any, now: number): Promise<void> {
-  if (!hooks || hooks.isSub) return
+  if (!hooks) return
   const dir = `${await home($)}/${DIR}`
   let entries: { name: string; mtimeMs?: number }[] = []
   try {
