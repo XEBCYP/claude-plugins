@@ -612,6 +612,88 @@ def cmd_doc(page, url, find, max_chars, full, links, out):
 
 # --- «Кто ссылается» (значок (i) у абзаца) и редакции ---
 
+# --- Акты, упомянутые в тексте: реквизиты (вид, дата, номер) и названия без реквизитов ---
+
+MONTHS = {m: i + 1 for i, m in enumerate(("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр",
+                                          "октябр", "ноябр", "декабр"))}
+KIND = (r"(?:Закон\w*|Кодекс\w*|кодекс\w*|Указ\w*|указ\w*|Декрет\w*|декрет\w*|[Пп]остановлени\w+|[Пп]риказ\w*|"
+        r"[Рр]ешени\w+|[Рр]аспоряжени\w+|[Пп]исьм\w+|[Рр]азъяснени\w+)")
+ACT_RE = re.compile(KIND + r"[^.;\n]{0,160}?\s+от\s+(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{4})\s*(?:г\.|года)?\s*"
+                    r"(?:N|№)\s*([\w/\-–.]*\w)")
+NAMED_RE = re.compile(r"(?:Положени(?:ем|е|я|ю|и)|Инструкци(?:ей|я|и|ю)|Правил(?:ами|ам|ах|а)?|Перечн(?:ем|ь|я|ю|е)|"
+                      r"Порядо?к(?:ом|а|е|у)?|Регламент\w*|Кодекс\w* Республики Беларусь|Закон\w* Республики Беларусь|"
+                      r"Трудов\w+ кодекс\w*|Налогов\w+ кодекс\w*|Гражданск\w+ кодекс\w*)"
+                      r"\s+(?:(?:о|об)\s+|«)[^,.;()\n»]{5,140}")
+
+
+def norm_date(d):
+    m = re.match(r"(\d{1,2})\s+([а-я]+)\s+(\d{4})", d)
+    if m:
+        mon = next((v for k, v in sorted(MONTHS.items(), key=lambda x: -len(x[0])) if m.group(2).startswith(k)), 0)
+        return f"{int(m.group(1)):02d}.{mon:02d}.{m.group(3)}"
+    dd, mm, yy = d.split(".")
+    return f"{int(dd):02d}.{int(mm):02d}.{yy}"
+
+
+def find_refs(text):
+    """Акты с реквизитами {(дата, номер): [вид, число упоминаний, первый кусок текста]} и названия без реквизитов."""
+    acts, named = {}, {}
+    for m in ACT_RE.finditer(text):
+        key = (norm_date(m.group(1)), m.group(2).rstrip(".-–"))
+        kind = re.sub(r"\s+", " ", m.group(0)[:m.start(1) - m.start()]).strip()
+        kind = re.sub(r"\s+от$", "", kind)
+        a = acts.setdefault(key, [kind[:110], 0, text[max(0, m.start() - 80):m.end() + 60].replace("\n", " ")])
+        a[1] += 1
+    for m in NAMED_RE.finditer(text):
+        name = re.sub(r"\s+", " ", m.group(0)).strip()
+        k = re.sub(r"^(\w{5})\w*", r"\1", name.lower())[:70]  # «Положением о …» и «Положение о …» — одно
+        named.setdefault(k, [name, 0])[1] += 1
+    return acts, named
+
+
+def cmd_refs(page, url, max_chars):
+    code = open_doc(page, url)
+    if code:
+        return code
+    text, how = text_by_word(page), "экспорт в Word"
+    if text is None:
+        text, _ = text_by_scroll(page)
+        how = "прокрутка (Word не скачался)"
+    if on_login_page(page):
+        return LOST
+    acts, named = find_refs(text)
+    done = walk(page, WALK_LINKS, limit_s=120)  # адреса: ссылки ilex на другие документы
+    if on_login_page(page):
+        return LOST
+    data = page.evaluate("() => window.__ilexLinks || {links: {}}")
+    here = re.search(r"/view-document/(\w+)/(\d+)", page.url)
+    docs = {}
+    for x in sorted(data["links"].values(), key=lambda x: x["o"]):
+        if not x["doc"] or (here and x["doc"] == here.group(2)):
+            continue
+        d = docs.setdefault((x["ib"], x["doc"]), [x["type"], 0, x["text"], x["para"]])
+        d[1] += 1
+    lines = [f"Текст: {how}, {len(text)} знаков",
+             f"\n--- Акты с реквизитами в тексте: {len(acts)} (дата | номер | вид | упоминаний | где) ---",
+             "Каждый — в реестр источников; найти в ilex: search \"<номер>\" или по виду и дате."]
+    for (dt, num), (kind, n, ctx) in sorted(acts.items(), key=lambda x: x[0][0][-4:] + x[0][0][3:5] + x[0][0][:2]):
+        lines.append(f"{dt} | {num} | {kind} | {n} | …{ctx[:170]}…")
+    lines.append(f"\n--- Названы без реквизитов: {len(named)} (название | упоминаний) — реквизиты искать в тексте или ilex ---")
+    lines += [f"{name} | {n}" for name, n in sorted(named.values(), key=lambda x: -x[1])]
+    lines.append(f"\n--- Ссылки ilex на другие документы: {len(docs)} (адрес | тип | ссылок | текст ссылки | абзац) ---")
+    for (ib, doc), (tp, n, t, para) in docs.items():
+        lines.append(f"/view-document/{ib}/{doc} | {tp or '—'} | {n} | {t[:50]} | {para[:70]}")
+    out = "\n".join(lines)
+    print(page.url)
+    print(out[:max_chars])
+    if len(out) > max_chars:
+        print(f"\n[обрезано: показано {max_chars} из {len(out)} знаков; больше — --max]")
+    if not done:
+        print("\n[ВНИМАНИЕ: ссылки ilex собраны не до конца документа (прокрутка остановлена по времени); акты "
+              "с реквизитами и названия выше — по всему тексту]")
+    return 0
+
+
 TABS = ["Все", "Законодательство", "Аналитика", "Формы", "Судебная практика"]
 LIST_ITEMS = """() => [...document.querySelectorAll('a.document-link[href*="/view-document/"]')].map(a => {
     let e = a, head = '';
@@ -790,6 +872,9 @@ def main():
     b.add_argument("--tab", choices=TABS)
     b.add_argument("--page", type=int, default=1)
     b.add_argument("--n", type=int, default=25)
+    r = sub.add_parser("refs")
+    r.add_argument("url")
+    r.add_argument("--max", type=int, default=30000)
     e = sub.add_parser("editions")
     e.add_argument("url")
     e.add_argument("--n", type=int, default=30)
@@ -828,6 +913,8 @@ def run(args):
                     code = cmd_search(page, args.query, args.n)
                 elif args.cmd == "doc":
                     code = cmd_doc(page, args.url, args.find, args.max, args.full, args.links, args.out)
+                elif args.cmd == "refs":
+                    code = cmd_refs(page, args.url, args.max)
                 elif args.cmd == "backlinks":
                     code = cmd_backlinks(page, args.url, args.seg, args.tab, args.page, args.n)
                 else:
