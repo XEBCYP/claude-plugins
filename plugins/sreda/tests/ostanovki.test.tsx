@@ -409,6 +409,21 @@ test('O02: подпроект на паузе глобальной — при з
   expect(env.contexts.filter(s => s.startsWith(CUT)).length).toBe(1)
 })
 
+test('O02: «продолжай» от глобальной приходит сообщением сессии (isMeta, origin peer) — пометка с ним', async ($, on) => {
+  const env = newEnv({ cwd: 'C:\\Projects\\Sub', dirs: { 'c:/projects': ['Global', 'Sub'] } })
+  env.files['c:/projects/Global/docs/Подпроекты.md'] = '- **Где:** `C:\\Projects\\Sub`'
+  env.files[`${STATE}/sess-1.json`] = JSON.stringify({ cwd: 'C:/Projects/Sub', busy: true, at: 900_000 })
+  env.files[`${HOME}/sreda-pauza.json`] = JSON.stringify({ at: 1, cwd: 'c:/projects/global' })
+  engine(on, env)
+  await $.session.start({ cwd: env.cwd, surface: 'desktop', isInteractive: true })
+  env.files[`${HOME}/sreda-pauza.json`] = '{}'
+  // Своё служебное сообщение (не от другой сессии) пометку не забирает
+  await $.prompt.submit({ text: 'служебное', isMeta: true, wait: false, origin: { kind: 'sdk' } } as never)
+  expect(env.contexts.filter(s => s.startsWith(CUT))).toEqual([])
+  await $.prompt.submit({ text: 'Продолжай', isMeta: true, wait: false, origin: { kind: 'peer', hostInjected: true } } as never)
+  expect(env.contexts.filter(s => s.startsWith(CUT)).length).toBe(1)
+})
+
 test('O03/O04/O06: чужая отметка «ход идёт» без обновления дольше 10 минут — одна карточка «ход оборван»', async ($, on) => {
   const env = newEnv()
   const clock = engine(on, env)
